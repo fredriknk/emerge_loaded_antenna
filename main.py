@@ -26,6 +26,17 @@ transition instead of a sharp bend.
 Tested against the EMerge 2.8.4 API layout.
 """
 
+import os
+from pathlib import Path
+
+# Prefer the MKL runtime installed in this venv.  On Windows, EMerge's
+# automatic search can otherwise pick an inaccessible DLL from a base Conda
+# installation, which makes Pardiso fail with 0xc06d007e at solve time.
+_venv_mkl_dir = Path(__file__).resolve().parent / ".venv" / "Library" / "bin"
+_venv_mkl = next(iter(sorted(_venv_mkl_dir.glob("mkl_rt*.dll"))), None)
+if _venv_mkl is not None:
+    os.environ["EMERGE_PARDISO_PATH"] = str(_venv_mkl)
+
 import numpy as np
 import emerge as em
 
@@ -47,16 +58,16 @@ MHz = 1e6
 # Change these first.
 # ============================================================================
 
-WIRE_RADIUS = 0.75 * mm          # 1.5 mm diameter wire
+WIRE_RADIUS = 1.0 * mm          # 1.5 mm diameter wire
 
-BOTTOM_LENGTH = 50 * mm
+BOTTOM_LENGTH = 20 * mm
 
 COIL1_RADIUS = 10 * mm          # centerline radius
-COIL1_TURNS = 2                 # integer turns
-COIL1_PITCH = 3.0 * mm          # axial rise per full turn
-COIL1_TRANSITION = 8 * mm       # smooth entrance/exit distance
+COIL1_TURNS = 1                 # integer turns
+COIL1_PITCH = 7.0 * mm          # axial rise per full turn
+COIL1_TRANSITION = 6 * mm       # smooth entrance/exit distance
 
-MIDDLE_LENGTH = 100 * mm
+MIDDLE_LENGTH = 40 * mm
 
 COIL2_RADIUS = COIL1_RADIUS
 COIL2_TURNS = COIL1_TURNS
@@ -85,9 +96,9 @@ WIRE_SECTIONS = 8
 
 F0 = 868 * MHz
 
-FREQ_START = 830 * MHz
-FREQ_STOP = 906 * MHz
-FREQ_POINTS = 39
+FREQ_START = 500 * MHz
+FREQ_STOP = 1500 * MHz
+FREQ_POINTS = 10
 # 39 points makes 868 MHz one of the actual sweep frequencies.
 
 PORT_HEIGHT = 2 * mm
@@ -98,8 +109,8 @@ C0 = 299_792_458.0
 WAVELENGTH = C0 / F0
 AIR_MARGIN = 0.25 * WAVELENGTH
 
-SHOW_GEOMETRY = True
-SHOW_COIL_PREVIEW = True
+SHOW_GEOMETRY = False
+SHOW_COIL_PREVIEW = False
 SHOW_MESH = False
 RUN_SOLVER = True
 
@@ -719,14 +730,26 @@ if RUN_SOLVER:
     # ========================================================================
 
     glob = data.scalar.grid
+    s11 = np.asarray(glob.S(1, 1))
+    s11_db = 20 * np.log10(np.maximum(np.abs(s11), 1e-12))
+    finite_s11_db = s11_db[np.isfinite(s11_db)]
+
+    if finite_s11_db.size:
+        s11_dblim = [
+            float(np.floor(np.min(finite_s11_db) - 3)),
+            float(np.ceil(np.max(finite_s11_db) + 1)),
+        ]
+    else:
+        s11_dblim = [-40, 5]
 
     plot_sp(
         glob.freq,
-        glob.S(1, 1),
+        s11,
+        dblim=s11_dblim,
     )
 
     smith(
-        glob.S(1, 1),
+        s11,
         f=glob.freq,
     )
 
