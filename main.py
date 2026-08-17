@@ -60,14 +60,14 @@ MHz = 1e6
 
 WIRE_RADIUS = 1.0 * mm          # 1.5 mm diameter wire
 
-BOTTOM_LENGTH = 20 * mm
+BOTTOM_LENGTH = 170 * mm
 
 COIL1_RADIUS = 10 * mm          # centerline radius
 COIL1_TURNS = 1                 # integer turns
 COIL1_PITCH = 7.0 * mm          # axial rise per full turn
 COIL1_TRANSITION = 6 * mm       # smooth entrance/exit distance
 
-MIDDLE_LENGTH = 40 * mm
+MIDDLE_LENGTH = 170 * mm
 
 COIL2_RADIUS = COIL1_RADIUS
 COIL2_TURNS = COIL1_TURNS
