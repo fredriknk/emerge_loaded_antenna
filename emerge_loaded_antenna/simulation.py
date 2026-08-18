@@ -43,6 +43,31 @@ class ModelArtifacts:
     volume_elements: int
 
 
+@dataclass(frozen=True)
+class FarFieldMetrics:
+    """Useful scalar summaries of a sampled 3D realized-gain pattern."""
+
+    frequency_hz: float
+    angular_step_deg: float
+    peak_gain_dbi: float
+    peak_theta_deg: float
+    peak_phi_deg: float
+    peak_elevation_deg: float
+    horizon_min_gain_dbi: float
+    horizon_p10_gain_dbi: float
+    horizon_mean_gain_dbi: float
+    horizon_p90_gain_dbi: float
+    horizon_peak_gain_dbi: float
+    horizon_ripple_p90_p10_db: float
+    horizon_peak_to_null_db: float
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            field: float(value)
+            for field, value in self.__dict__.items()
+        }
+
+
 @dataclass
 class SimulationResult:
     """Numerical result returned to scripts and optimizers."""
@@ -54,6 +79,7 @@ class SimulationResult:
     s11: np.ndarray
     s11_db: np.ndarray
     peak_gain_dbi: float | None = None
+    farfield_metrics: FarFieldMetrics | None = None
     farfield_3d: Any | None = None
     raw_data: Any | None = None
 
@@ -69,17 +95,82 @@ class SimulationResult:
     def s11_db_at(self, frequency: float) -> float:
         return float(self.s11_db[self.nearest_index(frequency)])
 
+    @property
+    def antenna_height(self) -> float:
+        return float(self.artifacts.path.z[-1] - self.design.port_height)
+
+    def gain_db_at(self, theta_deg: float, phi_deg: float) -> float:
+        """Return gain at the nearest sampled spherical direction."""
+        if self.farfield_3d is None:
+            raise RuntimeError("far-field gain was not computed")
+        theta = np.asarray(self.farfield_3d.theta, dtype=float)
+        phi = np.asarray(self.farfield_3d.phi, dtype=float)
+        theta_target = np.deg2rad(theta_deg)
+        phi_delta = np.angle(np.exp(1j*(phi - np.deg2rad(phi_deg))))
+        distance = (theta - theta_target)**2 + phi_delta**2
+        index = np.unravel_index(int(np.argmin(distance)), distance.shape)
+        amplitude = abs(np.asarray(self.farfield_3d.normE)[index]/em.lib.EISO)
+        return float(20*np.log10(max(amplitude, 1e-12)))
+
     def as_dict(self) -> dict[str, Any]:
-        return {
+        values = {
             "frequencies_hz": self.frequencies.tolist(),
             "s11_real": self.s11.real.tolist(),
             "s11_imag": self.s11.imag.tolist(),
             "s11_db": self.s11_db.tolist(),
             "peak_gain_dbi": self.peak_gain_dbi,
+            "antenna_height_m": self.antenna_height,
             "mesh_nodes": self.artifacts.mesh_nodes,
             "mesh_elements": self.artifacts.mesh_elements,
             "volume_elements": self.artifacts.volume_elements,
         }
+        if self.farfield_metrics is not None:
+            values["farfield_metrics"] = self.farfield_metrics.as_dict()
+        return values
+
+
+def _farfield_metrics(
+    farfield: Any,
+    frequency: float,
+    angular_step_deg: float,
+) -> FarFieldMetrics:
+    gain_amplitude = np.abs(np.asarray(farfield.normE)/em.lib.EISO)
+    gain_db = 20*np.log10(np.maximum(gain_amplitude, 1e-12))
+    theta = np.asarray(farfield.theta, dtype=float)
+    phi = np.asarray(farfield.phi, dtype=float)
+
+    peak_index = np.unravel_index(int(np.nanargmax(gain_db)), gain_db.shape)
+    peak_theta = float(np.rad2deg(theta[peak_index]))
+    peak_phi = float(np.rad2deg(phi[peak_index]))
+
+    horizon_index = int(np.argmin(np.abs(theta[0, :] - np.pi/2)))
+    horizon_gain = np.asarray(gain_db[:, horizon_index], dtype=float)
+    # -180 and +180 degrees are the same direction; do not double-count it.
+    if horizon_gain.size > 1:
+        horizon_gain = horizon_gain[:-1]
+    horizon_p10 = float(np.nanpercentile(horizon_gain, 10))
+    horizon_p90 = float(np.nanpercentile(horizon_gain, 90))
+    horizon_mean = float(
+        10*np.log10(np.nanmean(10**(horizon_gain/10)))
+    )
+    horizon_min = float(np.nanmin(horizon_gain))
+    horizon_peak = float(np.nanmax(horizon_gain))
+
+    return FarFieldMetrics(
+        frequency_hz=float(frequency),
+        angular_step_deg=float(angular_step_deg),
+        peak_gain_dbi=float(gain_db[peak_index]),
+        peak_theta_deg=peak_theta,
+        peak_phi_deg=peak_phi,
+        peak_elevation_deg=90.0 - peak_theta,
+        horizon_min_gain_dbi=horizon_min,
+        horizon_p10_gain_dbi=horizon_p10,
+        horizon_mean_gain_dbi=horizon_mean,
+        horizon_p90_gain_dbi=horizon_p90,
+        horizon_peak_gain_dbi=horizon_peak,
+        horizon_ripple_p90_p10_db=horizon_p90 - horizon_p10,
+        horizon_peak_to_null_db=horizon_peak - horizon_min,
+    )
 
 
 def _print_design(design: AntennaDesign, path: AntennaPath) -> None:
@@ -319,6 +410,7 @@ def simulate(
     s11_db = 20*np.log10(np.maximum(np.abs(s11), 1e-12))
 
     peak_gain_dbi = None
+    farfield_metrics = None
     farfield_3d = None
     if options.compute_farfield:
         farfield_frequency = (
@@ -327,10 +419,22 @@ def simulate(
             else options.sweep.center
         )
         field = data.field.find(freq=farfield_frequency)
-        farfield_3d = field.farfield_3d(artifacts.absorbing_selection)
-        gain_amplitude = np.abs(np.asarray(farfield_3d.normE)/em.lib.EISO)
-        gain_db = 20*np.log10(np.maximum(gain_amplitude, 1e-12))
-        peak_gain_dbi = float(np.nanmax(gain_db))
+        angular_step = options.farfield_angular_step_deg
+        theta_count = max(2, int(round(180.0/angular_step)) + 1)
+        phi_count = max(2, int(round(360.0/angular_step)) + 1)
+        thetas = np.linspace(0.0, np.pi, theta_count)
+        phis = np.linspace(-np.pi, np.pi, phi_count)
+        farfield_3d = field.farfield_3d(
+            artifacts.absorbing_selection,
+            thetas=thetas,
+            phis=phis,
+        )
+        farfield_metrics = _farfield_metrics(
+            farfield_3d,
+            float(field.freq),
+            angular_step,
+        )
+        peak_gain_dbi = farfield_metrics.peak_gain_dbi
 
     return SimulationResult(
         design=design,
@@ -340,6 +444,7 @@ def simulate(
         s11=s11,
         s11_db=s11_db,
         peak_gain_dbi=peak_gain_dbi,
+        farfield_metrics=farfield_metrics,
         farfield_3d=farfield_3d,
         raw_data=data,
     )

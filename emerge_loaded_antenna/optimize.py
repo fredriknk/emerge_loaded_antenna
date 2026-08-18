@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Callable, Literal, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Callable, Literal, Mapping, Sequence
 
 import numpy as np
 
@@ -131,6 +131,7 @@ class EvaluationRecord:
     s11_db: float | None
     peak_gain_dbi: float | None
     error: str | None = None
+    metrics: Mapping[str, float] = field(default_factory=dict)
 
 
 EvaluationCallback = Callable[[EvaluationRecord], None]
@@ -258,6 +259,188 @@ class GainMatchObjective:
                 float(score),
                 s11_db,
                 result.peak_gain_dbi,
+            )
+        except Exception as error:
+            score = self.failure_penalty
+            record = EvaluationRecord(
+                values,
+                score,
+                None,
+                None,
+                f"{type(error).__name__}: {error}",
+            )
+        self.history.append(record)
+        if self.on_evaluation is not None:
+            self.on_evaluation(record)
+        return float(score)
+
+
+class RobustGainObjective:
+    """Optimize useful gain with broadband match and pattern constraints.
+
+    ``pattern_mode="horizon"`` maximizes the 10th-percentile azimuth gain at
+    zero elevation. ``"directional"`` maximizes one requested theta/phi
+    direction, while ``"peak"`` retains the original unconstrained behavior.
+    """
+
+    def __init__(
+        self,
+        space: DesignSpace,
+        target_frequency: float = 868e6,
+        pattern_mode: Literal["horizon", "directional", "peak"] = "horizon",
+        target_theta_deg: float = 90.0,
+        target_phi_deg: float = 0.0,
+        maximum_s11_db: float = -10.0,
+        mismatch_weight: float = 2.0,
+        gain_weight: float = 1.0,
+        maximum_horizon_ripple_db: float = 1.5,
+        ripple_weight: float = 0.15,
+        minimum_horizon_gain_dbi: float = 2.0,
+        null_weight: float = 0.25,
+        maximum_height: float = 0.60,
+        height_weight: float = 0.10,
+        options: SimulationOptions | None = None,
+        failure_penalty: float = 1_000.0,
+        on_evaluation: EvaluationCallback | None = None,
+    ):
+        if pattern_mode not in {"horizon", "directional", "peak"}:
+            raise ValueError("invalid pattern_mode")
+        if not 0 <= target_theta_deg <= 180:
+            raise ValueError("target_theta_deg must be between zero and 180")
+        if maximum_height <= 0:
+            raise ValueError("maximum_height must be positive")
+        weights = (
+            mismatch_weight,
+            gain_weight,
+            ripple_weight,
+            null_weight,
+            height_weight,
+        )
+        if any(weight < 0 for weight in weights):
+            raise ValueError("objective weights must be non-negative")
+        if maximum_horizon_ripple_db < 0:
+            raise ValueError("maximum_horizon_ripple_db must be non-negative")
+        self.space = space
+        self.target_frequency = target_frequency
+        self.pattern_mode = pattern_mode
+        self.target_theta_deg = target_theta_deg
+        self.target_phi_deg = target_phi_deg
+        self.maximum_s11_db = maximum_s11_db
+        self.mismatch_weight = mismatch_weight
+        self.gain_weight = gain_weight
+        self.maximum_horizon_ripple_db = maximum_horizon_ripple_db
+        self.ripple_weight = ripple_weight
+        self.minimum_horizon_gain_dbi = minimum_horizon_gain_dbi
+        self.null_weight = null_weight
+        self.maximum_height = maximum_height
+        self.height_weight = height_weight
+        self.options = options or SimulationOptions(
+            sweep=FrequencySweep(center=target_frequency, span=10e6, points=3),
+            solve=True,
+            compute_farfield=True,
+            farfield_frequency=target_frequency,
+            farfield_angular_step_deg=2.0,
+            verbose=False,
+        )
+        self.options = replace(
+            self.options,
+            solve=True,
+            compute_farfield=True,
+            farfield_frequency=target_frequency,
+            show_geometry=False,
+            show_mesh=False,
+            show_coil_preview=False,
+        )
+        self.failure_penalty = float(failure_penalty)
+        self.on_evaluation = on_evaluation
+        self.history: list[EvaluationRecord] = []
+
+    @property
+    def best_record(self) -> EvaluationRecord | None:
+        return _best_record(self.history)
+
+    def __call__(self, vector: Sequence[float]) -> float:
+        values = tuple(float(value) for value in vector)
+        try:
+            design = self.space.decode(values)
+            result = simulate(design, self.options)
+            pattern = result.farfield_metrics
+            if pattern is None or result.peak_gain_dbi is None:
+                raise RuntimeError("far-field metrics were not computed")
+
+            s11_center = result.s11_db_at(self.target_frequency)
+            worst_s11 = float(np.max(result.s11_db))
+            mismatch = np.maximum(0.0, result.s11_db - self.maximum_s11_db)
+            mismatch_penalty = self.mismatch_weight*float(np.mean(mismatch**2))
+
+            if self.pattern_mode == "horizon":
+                useful_gain = pattern.horizon_p10_gain_dbi
+                ripple_excess = max(
+                    0.0,
+                    pattern.horizon_ripple_p90_p10_db
+                    - self.maximum_horizon_ripple_db,
+                )
+                null_deficit = max(
+                    0.0,
+                    self.minimum_horizon_gain_dbi
+                    - pattern.horizon_min_gain_dbi,
+                )
+                pattern_penalty = (
+                    self.ripple_weight*ripple_excess**2
+                    + self.null_weight*null_deficit**2
+                )
+            elif self.pattern_mode == "directional":
+                useful_gain = result.gain_db_at(
+                    self.target_theta_deg,
+                    self.target_phi_deg,
+                )
+                pattern_penalty = 0.0
+            else:
+                useful_gain = result.peak_gain_dbi
+                pattern_penalty = 0.0
+
+            height_excess_cm = max(
+                0.0,
+                (result.antenna_height - self.maximum_height)/0.01,
+            )
+            height_penalty = self.height_weight*height_excess_cm**2
+            score = (
+                mismatch_penalty
+                + pattern_penalty
+                + height_penalty
+                - self.gain_weight*useful_gain
+            )
+            metrics = {
+                "center_s11_db": s11_center,
+                "worst_s11_db": worst_s11,
+                "useful_gain_dbi": float(useful_gain),
+                "peak_gain_dbi": result.peak_gain_dbi,
+                "peak_theta_deg": pattern.peak_theta_deg,
+                "peak_phi_deg": pattern.peak_phi_deg,
+                "horizon_min_gain_dbi": pattern.horizon_min_gain_dbi,
+                "horizon_p10_gain_dbi": pattern.horizon_p10_gain_dbi,
+                "horizon_mean_gain_dbi": pattern.horizon_mean_gain_dbi,
+                "horizon_ripple_db": pattern.horizon_ripple_p90_p10_db,
+                "antenna_height_m": result.antenna_height,
+                "mismatch_penalty": mismatch_penalty,
+                "pattern_penalty": pattern_penalty,
+                "height_penalty": height_penalty,
+            }
+            metrics.update(
+                {
+                    f"s11_{frequency/1e6:g}_mhz_db": float(s11_value)
+                    for frequency, s11_value in zip(
+                        result.frequencies,
+                        result.s11_db,
+                    )
+                }
+            )
+            record = EvaluationRecord(
+                values,
+                float(score),
+                s11_center,
+                result.peak_gain_dbi,
+                metrics=metrics,
             )
         except Exception as error:
             score = self.failure_penalty

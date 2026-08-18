@@ -151,6 +151,7 @@ class SimulationOptions:
     solve: bool = True
     compute_farfield: bool = False
     farfield_frequency: float | None = None
+    farfield_angular_step_deg: float = 2.0
     show_geometry: bool = False
     show_mesh: bool = False
     show_coil_preview: bool = False
@@ -164,3 +165,7 @@ class SimulationOptions:
             raise ValueError("compute_farfield requires solve=True")
         if self.farfield_frequency is not None and self.farfield_frequency <= 0:
             raise ValueError("farfield_frequency must be positive")
+        if not 0 < self.farfield_angular_step_deg <= 10:
+            raise ValueError(
+                "farfield_angular_step_deg must be between zero and 10 degrees"
+            )

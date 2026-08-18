@@ -170,7 +170,23 @@ def report_farfield(result) -> None:
     plane_metrics("X-Z", ff_xz, "0 deg = +Z, +90 deg = +X")
     plane_metrics("Y-Z", ff_yz, "0 deg = +Z, +90 deg = +Y")
     plane_metrics("X-Y", ff_xy, "0 deg = +X, +90 deg = +Y")
+    metrics = result.farfield_metrics
     print(f"3D peak isotropic gain: {result.peak_gain_dbi:.2f} dBi")
+    if metrics is not None:
+        print(
+            f"3D peak direction     : theta {metrics.peak_theta_deg:.1f} deg, "
+            f"phi {metrics.peak_phi_deg:.1f} deg, "
+            f"elevation {metrics.peak_elevation_deg:.1f} deg"
+        )
+        print(
+            f"Horizon gain          : min {metrics.horizon_min_gain_dbi:.2f}, "
+            f"P10 {metrics.horizon_p10_gain_dbi:.2f}, "
+            f"mean {metrics.horizon_mean_gain_dbi:.2f} dBi"
+        )
+        print(
+            f"Horizon ripple        : "
+            f"{metrics.horizon_ripple_p90_p10_db:.2f} dB (P90-P10)"
+        )
 
     plane_peak_db = max(
         float(np.nanmax(20*np.log10(np.maximum(gain_amplitude(ff), 1e-12))))

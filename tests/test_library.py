@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,8 +14,10 @@ from emerge_loaded_antenna import (
     EvaluationRecord,
     FrequencySweep,
     GainMatchObjective,
+    RobustGainObjective,
     SimulationOptions,
     build_centerline,
+    design_from_dict,
 )
 
 
@@ -74,6 +76,20 @@ class DesignTests(unittest.TestCase):
         self.assertEqual(sweep.start, sweep.stop)
         self.assertEqual(sweep.points, 1)
 
+    def test_farfield_angular_step_is_validated(self):
+        options = SimulationOptions(farfield_angular_step_deg=0.0)
+        with self.assertRaisesRegex(ValueError, "angular_step"):
+            options.validate()
+
+    def test_design_json_mapping_round_trip(self):
+        original = replace(
+            AntennaDesign(),
+            coil1=replace(AntennaDesign().coil1, turns=2, radius=12e-3),
+        )
+        restored = design_from_dict(asdict(original))
+
+        self.assertEqual(restored, original)
+
     def test_objective_reports_best_successful_record(self):
         space = DesignSpace(
             AntennaDesign(),
@@ -107,6 +123,36 @@ class DesignTests(unittest.TestCase):
 
         self.assertEqual(score, -4.0)
         self.assertEqual(reported, objective.history)
+
+    def test_robust_objective_uses_horizon_and_band_metrics(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("middle_length", 180e-3, 260e-3),),
+        )
+        pattern = SimpleNamespace(
+            horizon_p10_gain_dbi=4.0,
+            horizon_min_gain_dbi=3.0,
+            horizon_mean_gain_dbi=4.2,
+            horizon_ripple_p90_p10_db=1.0,
+            peak_theta_deg=90.0,
+            peak_phi_deg=0.0,
+        )
+        fake_result = SimpleNamespace(
+            peak_gain_dbi=5.0,
+            farfield_metrics=pattern,
+            frequencies=np.array((863e6, 868e6, 873e6)),
+            s11_db=np.array((-12.0, -11.0, -10.5)),
+            s11_db_at=lambda frequency: -11.0,
+            antenna_height=0.55,
+            gain_db_at=lambda theta, phi: 4.5,
+        )
+        objective = RobustGainObjective(space)
+
+        with patch("emerge_loaded_antenna.optimize.simulate", return_value=fake_result):
+            score = objective((220e-3,))
+
+        self.assertEqual(score, -4.0)
+        self.assertEqual(objective.best_record.metrics["worst_s11_db"], -10.5)
 
 
 if __name__ == "__main__":

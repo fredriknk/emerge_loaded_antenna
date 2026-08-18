@@ -22,14 +22,17 @@ from .optimize import (
     EvaluationCallback,
     EvaluationRecord,
     GainMatchObjective,
+    RobustGainObjective,
     S11Objective,
 )
 from .simulation import (
+    FarFieldMetrics,
     ModelArtifacts,
     SimulationResult,
     build_model,
     simulate,
 )
+from .serialization import design_from_dict, load_design, save_design
 
 __all__ = [
     "AntennaDesign",
@@ -40,14 +43,19 @@ __all__ = [
     "DesignVariable",
     "EvaluationCallback",
     "EvaluationRecord",
+    "FarFieldMetrics",
     "FrequencySweep",
     "GainMatchObjective",
     "MeshSettings",
     "ModelArtifacts",
+    "RobustGainObjective",
     "S11Objective",
     "SimulationOptions",
     "SimulationResult",
     "build_centerline",
     "build_model",
+    "design_from_dict",
+    "load_design",
+    "save_design",
     "simulate",
 ]
