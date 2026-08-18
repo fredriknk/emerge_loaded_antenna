@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emerge-loaded-antenna"
+version = "0.1.0"
+description = "Parameterized EMerge model for a two-coil loaded antenna"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "emerge>=2.8.4,<3",
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+optimize = ["scipy>=1.12"]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["emerge_loaded_antenna*"]

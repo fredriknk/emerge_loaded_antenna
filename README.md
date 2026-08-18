@@ -1,6 +1,6 @@
 # Smooth Two-Coil Loaded Antenna in EMerge
 
-This script generates and simulates a **smooth, continuously curved two-coil loaded antenna** directly in [EMerge](https://github.com/FennisRobert/EMerge).
+This package generates and simulates a **smooth, continuously curved two-coil loaded antenna** directly in [EMerge](https://github.com/FennisRobert/EMerge). It provides a reusable Python API for scripts and optimizers, plus `main.py` as an interactive plotting example.
 
 The antenna geometry consists of:
 
@@ -34,13 +34,84 @@ straight section as it could with one global BSpline.
 
 ## Requirements
 
-The script is intended for:
+The package is intended for:
 
 * Python 3.10–3.13
 * EMerge 2.8.4
 * NumPy
 
-Install EMerge using your normal EMerge installation procedure.
+Install the project in editable mode inside the existing virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+## Library API
+
+All public dimensions are metres and all frequencies are hertz. A headless
+single-frequency evaluation suitable for an optimizer is:
+
+```python
+from dataclasses import replace
+
+from emerge_loaded_antenna import (
+    AntennaDesign,
+    FrequencySweep,
+    SimulationOptions,
+    simulate,
+)
+
+design = replace(AntennaDesign(), middle_length=225e-3)
+options = SimulationOptions(
+    sweep=FrequencySweep.single(868e6),
+    show_geometry=False,
+    show_mesh=False,
+    compute_farfield=False,
+    verbose=False,
+)
+result = simulate(design, options)
+print(result.s11_db_at(868e6))
+print(result.as_dict())
+```
+
+`simulate()` returns structured frequencies, complex S11, S11 in dB, mesh
+counts, optional peak gain, and the underlying EMerge artifacts when deeper
+inspection is needed. `build_model()` performs geometry and meshing without a
+solve.
+
+### Optimizer Adapter
+
+```python
+from emerge_loaded_antenna import (
+    AntennaDesign,
+    DesignSpace,
+    DesignVariable,
+    S11Objective,
+)
+
+space = DesignSpace(
+    AntennaDesign(),
+    (
+        DesignVariable("bottom_length", 100e-3, 180e-3),
+        DesignVariable("middle_length", 160e-3, 260e-3),
+        DesignVariable("coil1.pitch", 5e-3, 10e-3),
+        DesignVariable("coil2.pitch", 5e-3, 10e-3),
+    ),
+)
+objective = S11Objective(space, target_frequency=868e6)
+
+# Pass objective and space.bounds to scipy.optimize or another minimizer.
+score = objective(space.initial_vector)
+```
+
+`GainMatchObjective` adds a configurable S11 constraint penalty and maximizes
+3D peak isotropic gain. Both objectives retain evaluation history and convert
+geometry/solver failures into a finite penalty. See
+`examples/optimize_gain.py` for a SciPy differential-evolution example.
+
+EMerge and Gmsh use process-global model state. Sequential evaluations in one
+process are supported and tested. Use separate processes—not worker threads—
+for parallel optimization.
 
 The script imports:
 
@@ -77,15 +148,10 @@ smooth transition
 top straight
 ```
 
-The resulting XYZ coordinates are passed to:
+The independent curve pieces are assembled into one OpenCASCADE wire:
 
 ```python
-antenna_curve = em.geo.Curve(
-    xpts,
-    ypts,
-    zpts,
-    ctype="Spline",
-)
+antenna_curve = CompositeCurve(path.segments)
 ```
 
 EMerge then sweeps a circular cross-section along this centerline:
@@ -171,139 +237,57 @@ Straight
 
 ## Main Parameters
 
-Most antenna dimensions are located near the top of the script.
-
-### Wire
-
-```python
-WIRE_RADIUS = 0.75 * mm
-```
-
-This is the physical radius of the conductor.
-
-For example:
-
-```text
-0.75 mm radius
-=
-1.50 mm wire diameter
-```
-
-### Bottom Straight
+All physical dimensions live in immutable `AntennaDesign` and `CoilDesign`
+objects. SI units are used throughout, so dimensions are specified in metres.
 
 ```python
-BOTTOM_LENGTH = 50 * mm
-```
+from emerge_loaded_antenna import AntennaDesign, CoilDesign
 
-Length from the feed to the beginning of the first loading coil.
-
-### Coil 1
-
-```python
-COIL1_RADIUS = 10 * mm
-COIL1_TURNS = 6
-COIL1_PITCH = 3.0 * mm
-COIL1_TRANSITION = 6 * mm
-COIL1_TRANSITION_OFFSET = 4.75 * mm
-```
-
-`COIL1_RADIUS` is measured from the helix axis to the **wire centerline**.
-
-Approximate outside coil diameter is therefore:
-
-```text
-2 × (coil radius + wire radius)
-```
-
-For the default example:
-
-```text
-2 × (10 + 0.75)
-=
-21.5 mm
-```
-
-`COIL1_TURNS` must currently be an integer.
-
-For example:
-
-```text
-6 turns = 2160°
-```
-
-Using an integer number of turns allows the outgoing straight wire to return to exactly the same XY position as the incoming wire.
-
-`COIL1_PITCH` is the vertical rise per complete revolution.
-
-For example:
-
-```text
-6 turns × 3 mm pitch
-=
-18 mm nominal helical rise
-```
-
-`COIL1_TRANSITION` controls how gradually the wire enters and exits the helix.
-
-A larger value produces a gentler bend.
-
-`COIL1_TRANSITION_OFFSET` is the chord distance from the straight centerline
-to the helix join point. It is independent of pitch. With a 10 mm coil radius,
-the 4.75 mm default corresponds to about 27.5 degrees around the coil, instead
-of the old 45-degree wing. This value is tested with both one- and two-turn
-coils using a 2 mm wire diameter.
-
-### Middle Straight
-
-```python
-MIDDLE_LENGTH = 100 * mm
-```
-
-Distance between the two loading coils.
-
-### Coil 2
-
-```python
-COIL2_RADIUS = 10 * mm
-COIL2_TURNS = 6
-COIL2_PITCH = 3.0 * mm
-COIL2_TRANSITION = 6 * mm
-```
-
-These have the same meaning as the Coil 1 parameters.
-
-### Top Straight
-
-```python
-TOP_LENGTH = 50 * mm
-```
-
-Length above the second loading coil.
-
-## Coil Handedness
-
-Each coil can currently be generated as either right-handed or left-handed.
-
-For example:
-
-```python
-path_builder.coil(
-    radius=COIL1_RADIUS,
-    turns=COIL1_TURNS,
-    pitch=COIL1_PITCH,
-    transition=COIL1_TRANSITION,
-    handedness="RH",
+design = AntennaDesign(
+    wire_radius=1.0e-3,
+    bottom_length=0.120,
+    coil1=CoilDesign(
+        radius=0.010,
+        turns=1,
+        pitch=0.007,
+        transition=0.006,
+        transition_offset=0.00475,
+        handedness="RH",
+    ),
+    middle_length=0.221,
+    coil2=CoilDesign(
+        radius=0.010,
+        turns=1,
+        pitch=0.007,
+        transition=0.006,
+        transition_offset=0.00475,
+        handedness="RH",
+    ),
+    top_length=0.150,
 )
 ```
 
-Available values are:
+The coil radius is measured to the wire centerline, so its approximate outside
+diameter is `2 * (coil.radius + design.wire_radius)`. Pitch is the axial rise
+per complete revolution. Transition length controls the local entry/exit bend;
+transition offset sets the chord distance from the straight axis to the helix
+join independently of pitch.
 
-```text
-"RH"    right-handed
-"LH"    left-handed
+Coil turns must currently be positive integers. Handedness may be `"RH"` or
+`"LH"`, independently for each coil.
+
+Because designs are frozen and safe to reuse, change one parameter with
+`dataclasses.replace`:
+
+```python
+from dataclasses import replace
+
+candidate = replace(design, middle_length=0.225)
+candidate = replace(
+    candidate,
+    coil1=replace(candidate.coil1, pitch=0.0065),
+)
 ```
-
-Both coils can use the same handedness or different handedness.
 
 ## Geometry Resolution
 
@@ -340,58 +324,44 @@ For initial antenna optimization, 6–8 sections will usually be considerably fa
 
 ## Simulation Frequency
 
-The default example targets the 868 MHz ISM/SRD region:
+The default sweep targets the 868 MHz ISM/SRD region:
 
 ```python
-F0 = 868 * MHz
+from emerge_loaded_antenna import FrequencySweep
 
-FREQ_START = 830 * MHz
-FREQ_STOP = 906 * MHz
-FREQ_POINTS = 39
+sweep = FrequencySweep(center=868e6, span=100e6, points=5)
 ```
 
-This produces a sweep around 868 MHz.
-
-With these values, 868 MHz is one of the actual simulated frequency points.
+The center frequency is always included when `points` is odd. Use
+`FrequencySweep.single(868e6)` for inexpensive optimizer evaluations.
 
 The antenna dimensions supplied with the script are **examples only** and are not claimed to form a properly tuned 868 MHz antenna.
 
 ## Feed
 
-The antenna centerline starts at:
+Feed dimensions and reference impedance are part of the design:
 
 ```python
-z = PORT_HEIGHT
+design = AntennaDesign(
+    port_height=2e-3,
+    port_impedance=50.0,
+)
 ```
 
 A short cylindrical lumped-port region is created from the grounded hub to
-the antenna:
-
-```python
-PORT_HEIGHT = 2 * mm
-```
-
-The feed volume intentionally has no copper material assignment. Its side
+the antenna. The feed volume intentionally has no copper material assignment. Its side
 surface carries the EMerge lumped-port boundary condition, while the solid
 radial hub beneath it supplies the ground reference. Assigning copper to the
 feed suppresses the port field and produces a flat 0 dB S11 response.
-
-The default port impedance is:
-
-```python
-PORT_IMPEDANCE = 50.0
-```
-
-corresponding to a conventional 50 Ω RF system.
 
 ## Air Region
 
 The antenna is placed inside an air box.
 
-The margin around the antenna defaults to:
+The margin around the antenna defaults to a quarter wavelength:
 
 ```python
-AIR_MARGIN = 0.25 * WAVELENGTH
+mesh = MeshSettings(air_margin_wavelengths=0.25)
 ```
 
 where:
@@ -421,24 +391,20 @@ composite wire of exact straight lines, local transition curves, and three
 Bezier arcs per helical turn. This avoids both coincident-volume PLC errors and
 the excessive triangulation caused by the former global BSpline.
 
-```python
-ANTENNA_MESH_SIZE = 3.0 * WIRE_RADIUS
-```
+`MeshSettings(antenna_size_factor=3.0)` sets the antenna maximum element size
+to three wire radii. This setting is tested with both one- and two-turn coils.
 
-The 3-radius setting is tested with both one- and two-turn coils.
-
-and the model also receives the global setting:
+The equivalent global and curved-boundary settings are also configurable:
 
 ```python
-model.set_resolution(0.5)
+mesh = MeshSettings(
+    wavelength_resolution=0.5,
+    curved_boundary_segments=12,
+)
 ```
 
-The curved-boundary factor is now moderate because it no longer has to repair
-a distorted global spline:
-
-```python
-model.mesher.set_curved_boundary_meshing(12)
-```
+The curved-boundary factor is moderate because it no longer has to repair a
+distorted global spline.
 
 With the current example geometry, the old global-spline mesh used 7,595 nodes
 and 54,925 total elements. The composite path uses 3,048 nodes and 22,734
@@ -587,39 +553,29 @@ This can be expanded later to investigate:
 
 ## Changing the Antenna
 
-The simplest workflow is to modify only the parameter section.
-
-For example:
+Construct a new design or use `dataclasses.replace` to derive one from a
+known baseline. Nested coils can be replaced independently:
 
 ```python
-WIRE_RADIUS = 0.5 * mm
+from dataclasses import replace
 
-BOTTOM_LENGTH = 90 * mm
-
-COIL1_RADIUS = 8 * mm
-COIL1_TURNS = 8
-COIL1_PITCH = 2.5 * mm
-COIL1_TRANSITION = 5 * mm
-
-MIDDLE_LENGTH = 120 * mm
-
-COIL2_RADIUS = 8 * mm
-COIL2_TURNS = 5
-COIL2_PITCH = 2.5 * mm
-COIL2_TRANSITION = 5 * mm
-
-TOP_LENGTH = 80 * mm
+candidate = replace(
+    design,
+    wire_radius=0.5e-3,
+    bottom_length=90e-3,
+    middle_length=120e-3,
+    top_length=80e-3,
+    coil1=replace(design.coil1, radius=8e-3, turns=8, pitch=2.5e-3),
+    coil2=replace(design.coil2, radius=8e-3, turns=5, pitch=2.5e-3),
+)
 ```
 
-The rest of the geometry and simulation regenerate automatically.
+The geometry and simulation regenerate from the candidate automatically.
 
 ## Automatic Optimization
 
-One major advantage of generating the antenna directly in EMerge instead of FreeCAD is that all antenna dimensions are Python variables.
-
-This makes automatic optimization possible.
-
-For example, a future version can expose parameters such as:
+The `DesignSpace` adapter exposes scalar and integer parameters using dotted
+paths, including nested coil fields such as:
 
 ```text
 bottom straight length
@@ -645,7 +601,10 @@ or, more realistically:
 minimize worst-case S11 from 863–870 MHz
 ```
 
-An optimizer can then automatically generate and simulate many antenna geometries.
+`S11Objective` and `GainMatchObjective` are directly callable by SciPy and
+other minimizers. They decode vectors, validate and simulate candidates, keep
+history, and return a finite penalty when a candidate cannot be meshed or
+solved.
 
 A typical workflow could become:
 
@@ -708,8 +667,10 @@ for housing / PCB / enclosure
 If:
 
 ```python
-COIL1_RADIUS = 10 * mm
-WIRE_RADIUS = 0.75 * mm
+design = AntennaDesign(
+    wire_radius=0.75e-3,
+    coil1=CoilDesign(radius=10e-3),
+)
 ```
 
 the physical outer radius of the coil is approximately:
