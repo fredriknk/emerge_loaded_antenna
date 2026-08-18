@@ -107,10 +107,10 @@ helix
 
 That represents an infinitely sharp bend, which is not representative of a real bent wire.
 
-This script instead uses compact quintic Hermite connectors. Each connector
-starts vertically and arrives tangent to the constant-pitch helix. Its angular
-allowance is independent of pitch, so a 6 mm connector no longer consumes most
-of a tightly pitched turn or creates a broad sweeping elbow.
+This script instead uses compact cubic Hermite connectors. Each connector
+starts vertically and arrives tangent to the constant-pitch helix. A small
+chord offset controls how far it travels around the coil, independently of
+pitch, so a 6 mm connector no longer creates a broad sweeping elbow.
 
 <!-- Description of the superseded angular-velocity transition:
 The transition uses the quintic smoothstep function:
@@ -200,7 +200,7 @@ COIL1_RADIUS = 10 * mm
 COIL1_TURNS = 6
 COIL1_PITCH = 3.0 * mm
 COIL1_TRANSITION = 6 * mm
-COIL1_TRANSITION_ANGLE = 45.0
+COIL1_TRANSITION_OFFSET = 4.75 * mm
 ```
 
 `COIL1_RADIUS` is measured from the helix axis to the **wire centerline**.
@@ -236,15 +236,18 @@ For example:
 ```text
 6 turns × 3 mm pitch
 =
-18 mm total axial coil height
+18 mm nominal helical rise
 ```
 
 `COIL1_TRANSITION` controls how gradually the wire enters and exits the helix.
 
 A larger value produces a gentler bend.
 
-`COIL1_TRANSITION_ANGLE` controls where each compact connector joins the
-constant-pitch helix. It is independent of pitch; 45 degrees is the default.
+`COIL1_TRANSITION_OFFSET` is the chord distance from the straight centerline
+to the helix join point. It is independent of pitch. With a 10 mm coil radius,
+the 4.75 mm default corresponds to about 27.5 degrees around the coil, instead
+of the old 45-degree wing. This value is tested with both one- and two-turn
+coils using a 2 mm wire diameter.
 
 ### Middle Straight
 
@@ -737,10 +740,21 @@ the total coil height remains:
 ```
 -->
 
-The two connectors use a fixed angular allowance set by
-`COIL1_TRANSITION_ANGLE`; the remaining requested rotation uses the specified
+The two connectors use a small chord allowance set by
+`COIL1_TRANSITION_OFFSET`; the remaining requested rotation uses the specified
 constant pitch. Consequently, connector length can be selected for bend
-quality without imposing a minimum coil pitch.
+quality without imposing a minimum coil pitch. The exact axial height is:
+
+```text
+2 x transition + turns x pitch - join_angle x pitch / pi
+```
+
+where `join_angle = 2 x asin(offset / (2 x radius))` in radians.
+
+The long straight sections remain coarsely sampled. Only five local BSpline
+guard points are added within four wire radii of each end. These keep the
+straight wire pinned at a coil junction without applying fine resolution over
+its full length.
 
 ### Integer Turns
 

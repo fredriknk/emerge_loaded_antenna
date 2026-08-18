@@ -19,9 +19,9 @@ Geometry:
 The ENTIRE antenna conductor above the feed is generated as one continuous
 3D spline and swept with a circular wire cross-section.
 
-The straight -> helix and helix -> straight transitions use compact quintic
-Hermite connectors. Their join angle is independent of helix pitch, avoiding
-the broad pitch-dependent entry sweep used by the original implementation.
+The straight -> helix and helix -> straight transitions use compact cubic
+Hermite connectors with a small local sideways offset. The offset is
+independent of helix pitch, avoiding a broad entry sweep.
 
 Tested against the EMerge 2.8.4 API layout.
 """
@@ -70,7 +70,7 @@ COIL1_RADIUS = 10 * mm          # centerline radius
 COIL1_TURNS = 1                 # integer turns
 COIL1_PITCH = 7.0 * mm          # axial rise per full turn
 COIL1_TRANSITION = 6 * mm       # smooth entrance/exit distance
-COIL1_TRANSITION_ANGLE = 45.0   # helix join phase; independent of pitch
+COIL1_TRANSITION_OFFSET = 4.75 * mm  # compact, two-turn sweep-safe lead-in
 
 MIDDLE_LENGTH = 221 * mm    
 
@@ -78,7 +78,7 @@ COIL2_RADIUS = COIL1_RADIUS
 COIL2_TURNS = COIL1_TURNS
 COIL2_PITCH = COIL1_PITCH
 COIL2_TRANSITION = COIL1_TRANSITION
-COIL2_TRANSITION_ANGLE = COIL1_TRANSITION_ANGLE
+COIL2_TRANSITION_OFFSET = COIL1_TRANSITION_OFFSET
 
 TOP_LENGTH = BOTTOM_LENGTH
 
@@ -198,6 +198,22 @@ def quintic_hermite(p0, p1, v0, v1, a0, a1, u):
     )
 
 
+def cubic_hermite(p0, p1, v0, v1, u):
+    """Tangent-continuous vector blend with independently sized handles."""
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+    v1 = np.asarray(v1, dtype=float)
+    u = np.asarray(u, dtype=float)[:, None]
+
+    return (
+        (2*u**3 - 3*u**2 + 1)*p0
+        + (-2*u**3 + 3*u**2)*p1
+        + (u**3 - 2*u**2 + u)*v0
+        + (u**3 - u**2)*v1
+    )
+
+
 # ============================================================================
 # CENTERLINE BUILDER
 # ============================================================================
@@ -248,17 +264,25 @@ class AntennaPath:
 
     def straight(self, length, points=8):
         """
-        Add a vertical straight section.
+        Add a vertical straight section with local BSpline guard points.
+
+        The long interior remains coarse, while a few closely spaced control
+        points at each end prevent a neighbouring coil from pulling the
+        global BSpline into a long, visibly bent "straight" section.
         """
 
         if length <= 0:
             return
 
-        z = np.linspace(
-            self.current_z,
-            self.current_z + length,
-            points,
+        coarse_s = np.linspace(0.0, length, points)
+        guard_offsets = WIRE_RADIUS*np.array((0.0, 0.5, 1.0, 2.0, 4.0))
+        guard_offsets = guard_offsets[guard_offsets <= 0.5*length]
+        s = np.unique(
+            np.concatenate(
+                (coarse_s, guard_offsets, length - guard_offsets)
+            )
         )
+        z = self.current_z + s
 
         x = np.full_like(z, self.current_x)
         y = np.full_like(z, self.current_y)
@@ -483,22 +507,27 @@ class AntennaPath:
         turns,
         pitch,
         transition,
-        transition_angle=45.0,
+        transition_offset=None,
         handedness="RH",
         points_per_turn=32,
     ):
         """Add a helix with compact tangent-continuous connectors.
 
-        ``transition`` controls connector length only. ``transition_angle``
-        controls where each connector meets the constant-pitch helix, so the
-        transition length is no longer constrained by pitch.
+        ``transition`` controls each connector's axial length, while
+        ``transition_offset`` limits how far around the coil circumference a
+        connector travels. The complete path still makes the requested
+        integer number of turns, independent of helix pitch.
         """
         if radius <= 0 or pitch <= 0 or transition <= 0:
             raise ValueError("radius, pitch and transition must all be > 0.")
         if int(turns) != turns or turns <= 0:
             raise ValueError("turns must be a positive integer.")
-        if not 0 < transition_angle < 180:
-            raise ValueError("transition_angle must be between 0 and 180 degrees.")
+        if transition_offset is None:
+            transition_offset = min(0.5*radius, 0.8*transition)
+        if not 0 < transition_offset < 2*radius:
+            raise ValueError(
+                "transition_offset must be > 0 and smaller than diameter."
+            )
 
         turns = int(turns)
         if handedness.upper() == "RH":
@@ -509,12 +538,13 @@ class AntennaPath:
             raise ValueError("handedness must be 'RH' or 'LH'.")
 
         omega = sign * 2*np.pi / pitch
-        alpha = sign * np.deg2rad(transition_angle)
+        # Convert the requested local chord displacement to a join angle.
+        # This keeps the visible elbow compact and, unlike the old transition,
+        # does not make its angular span depend on pitch.
+        alpha = sign * 2*np.arcsin(transition_offset / (2*radius))
         middle_rotation = sign * 2*np.pi*turns - 2*alpha
         if sign * middle_rotation <= 0:
-            raise ValueError(
-                "transition_angle is too large for the requested turn count."
-            )
+            raise ValueError("transition_offset is too large for the turn count.")
         middle_length = abs(middle_rotation / omega)
 
         x0 = self.current_x
@@ -546,21 +576,19 @@ class AntennaPath:
             )
         )
         d_in_1 /= np.linalg.norm(d_in_1)
-        dd_in_0 = np.zeros(3)
-        dd_in_1 = np.zeros(3)
-        path_in = quintic_hermite(
+        vertical_handle = 0.75*transition
+        helix_handle = 1.75*transition
+        path_in = cubic_hermite(
             p_in_0,
             p_in_1,
-            transition*d_in_0,
-            transition*d_in_1,
-            transition**2*dd_in_0,
-            transition**2*dd_in_1,
+            vertical_handle*d_in_0,
+            helix_handle*d_in_1,
             u,
         )
         self._append(path_in[:, 0], path_in[:, 1], path_in[:, 2])
 
-        # Constant-pitch portion. The connectors consume a fixed angular
-        # allowance rather than an axial length derived from pitch.
+        # Constant-pitch middle section. The two compact connectors consume
+        # the small remaining angular allowances at the ends.
         n_middle = max(
             8,
             int(np.ceil(points_per_turn * middle_length / pitch)) + 1,
@@ -592,15 +620,11 @@ class AntennaPath:
         )
         d_out_0 /= np.linalg.norm(d_out_0)
         d_out_1 = np.array((0.0, 0.0, 1.0))
-        dd_out_0 = np.zeros(3)
-        dd_out_1 = np.zeros(3)
-        path_out = quintic_hermite(
+        path_out = cubic_hermite(
             p_out_0,
             p_out_1,
-            transition*d_out_0,
-            transition*d_out_1,
-            transition**2*dd_out_0,
-            transition**2*dd_out_1,
+            helix_handle*d_out_0,
+            vertical_handle*d_out_1,
             u,
         )
         self._append(path_out[:, 0], path_out[:, 1], path_out[:, 2])
@@ -638,7 +662,7 @@ path_builder.coil(
     turns=COIL1_TURNS,
     pitch=COIL1_PITCH,
     transition=COIL1_TRANSITION,
-    transition_angle=COIL1_TRANSITION_ANGLE,
+    transition_offset=COIL1_TRANSITION_OFFSET,
     handedness="RH",
     points_per_turn=POINTS_PER_TURN,
 )
@@ -652,7 +676,7 @@ path_builder.coil(
     turns=COIL2_TURNS,
     pitch=COIL2_PITCH,
     transition=COIL2_TRANSITION,
-    transition_angle=COIL2_TRANSITION_ANGLE,
+    transition_offset=COIL2_TRANSITION_OFFSET,
     handedness="RH",
     points_per_turn=POINTS_PER_TURN,
 )
