@@ -71,7 +71,7 @@ COIL1_TURNS = 1                 # integer turns
 COIL1_PITCH = 7.0 * mm          # axial rise per full turn
 COIL1_TRANSITION = 6 * mm       # smooth entrance/exit distance
 
-MIDDLE_LENGTH = 170 * mm
+MIDDLE_LENGTH = BOTTOM_LENGTH
 
 COIL2_RADIUS = COIL1_RADIUS
 COIL2_TURNS = COIL1_TURNS
@@ -87,11 +87,15 @@ TOP_LENGTH = BOTTOM_LENGTH
 
 # Number of centerline samples for every complete revolution.
 # 32 is a reasonable starting point.
-POINTS_PER_TURN = 32
+POINTS_PER_TURN = 16
 
 # Number of polygon sides approximating the circular wire.
 # Higher = rounder but heavier mesh.
-WIRE_SECTIONS = 8
+WIRE_SECTIONS = 6
+
+# Mesh size for the single continuous swept conductor.  Keeping one sweep is
+# important here: separate touching sweeps trigger Gmsh PLC errors.
+ANTENNA_MESH_SIZE = 3 * WIRE_RADIUS
 
 
 # ============================================================================
@@ -113,8 +117,8 @@ WAVELENGTH = C0 / F0
 AIR_MARGIN = 0.25 * WAVELENGTH
 
 SHOW_GEOMETRY = True
-SHOW_COIL_PREVIEW = False
-SHOW_MESH = False
+SHOW_COIL_PREVIEW = True
+SHOW_MESH = True
 RUN_SOLVER = True
 
 
@@ -157,7 +161,6 @@ class AntennaPath:
         self.x = []
         self.y = []
         self.z = []
-
         self.current_x = x
         self.current_y = y
         self.current_z = z
@@ -215,7 +218,6 @@ class AntennaPath:
         y = np.full_like(z, self.current_y)
 
         self._append(x, y, z)
-
     def coil(
         self,
         radius,
@@ -420,7 +422,6 @@ class AntennaPath:
         y_out = center_y + radius*np.sin(theta_out)
 
         self._append(x_out, y_out, z_out)
-
         # Because turns is integer, numerical noise aside, the final point
         # should equal x0,y0. Force the exact location to avoid tiny drift.
         self.x[-1] = x0
@@ -524,23 +525,19 @@ model.check_version(
 
 
 # ============================================================================
-# CREATE ONE CONTINUOUS XYZ SPLINE
+# CREATE ONE CONTINUOUS XYZ SPLINE AND SWEEP THE WIRE
+#
+# Keeping this as one swept volume avoids coincident end faces at the
+# coil/straight joins, which can trigger Gmsh PLC errors for thin wires.
 # ============================================================================
 
 antenna_curve = em.geo.Curve(
     xpts,
     ypts,
     zpts,
-    # BSpline is more robust than an interpolating Spline for this dense,
-    # tightly curved path with the current Gmsh/OpenCASCADE backend.
     ctype="BSpline",
     name="AntennaCenterline",
 )
-
-
-# ============================================================================
-# SWEEP THE WIRE CROSS-SECTION
-# ============================================================================
 
 wire_section = em.geo.XYPolygon.circle(
     WIRE_RADIUS,
@@ -551,16 +548,20 @@ antenna = (
     antenna_curve
     .pipe(
         wire_section,
-        name="Antenna"
+        max_mesh_size=ANTENNA_MESH_SIZE,
+        name="Antenna",
     )
-    .set_material(
-        em.lib.MET_COPPER
-    )
+    .set_material(em.lib.MET_COPPER)
     .foreground()
 )
 
-# Fine mesh around the wire.
-antenna.max_meshsize = 3 * WIRE_RADIUS
+# EMerge 2.8.x requires the volume property to be set explicitly.
+antenna.max_meshsize = ANTENNA_MESH_SIZE
+
+print(
+    f"Conductor mesh size: {ANTENNA_MESH_SIZE/mm:.1f} mm "
+    "(single continuous sweep)"
+)
 
 
 # ============================================================================
@@ -608,37 +609,54 @@ feed = (
 feed.max_meshsize = 3 * WIRE_RADIUS
 
 
-# Small copper hub gives the four radials a finite-area electrical/mechanical
-# connection to the feed instead of four zero-area point contacts.
-ground_hub = (
-    em.geo.Cylinder(
-        4 * WIRE_RADIUS,
-        PORT_HEIGHT / 2,
-        cs=em.GCS.displace(0.0, 0.0, 0.0),
-        Nsections=WIRE_SECTIONS,
-        name="GroundHub",
-    )
-    .set_material(em.lib.MET_COPPER)
-    .foreground()
+# Annular copper hub for the radials.  The center hole keeps the signal feed
+# electrically separate from the radial ground assembly.
+GROUND_HUB_OUTER_RADIUS = 4 * WIRE_RADIUS
+GROUND_HUB_INNER_RADIUS = 1.5 * WIRE_RADIUS
+GROUND_HUB_HEIGHT = 3 * WIRE_RADIUS
+GROUND_HUB_Z = -GROUND_HUB_HEIGHT
+GROUND_HUB_SECTIONS = max(24, WIRE_SECTIONS)
+
+ground_hub_outer = em.geo.Cylinder(
+    GROUND_HUB_OUTER_RADIUS,
+    GROUND_HUB_HEIGHT,
+    cs=em.GCS.displace(0.0, 0.0, GROUND_HUB_Z),
+    Nsections=GROUND_HUB_SECTIONS,
+    name="GroundHubOuter",
 )
+ground_hub_inner = em.geo.Cylinder(
+    GROUND_HUB_INNER_RADIUS,
+    GROUND_HUB_HEIGHT,
+    cs=em.GCS.displace(0.0, 0.0, GROUND_HUB_Z),
+    Nsections=GROUND_HUB_SECTIONS,
+    name="GroundHubHole",
+)
+ground_hub = em.geo.subtract(
+    ground_hub_outer,
+    ground_hub_inner,
+).set_material(
+    em.lib.MET_COPPER
+).foreground()
 ground_hub.max_meshsize = 3 * WIRE_RADIUS
 
 
 # ============================================================================
 # FOUR- RADIAL ANGLED GROUND PLANE
 #
-# Each radial starts at the feed origin and slopes downward.  The four
+# Each radial starts at the annular hub and slopes downward.  The four
 # cylinders are arranged at 90-degree azimuth spacing, making a symmetric
-# ground plane around the vertical radiator.
+# ground plane around the vertical radiator while leaving the feed hole clear.
 # ============================================================================
 
 radials = []
 radial_tilt = 90.0 + RADIAL_ANGLE
+radial_start = 3 * WIRE_RADIUS
 
 for index in range(RADIAL_COUNT):
     radial = em.geo.Cylinder(
         WIRE_RADIUS,
-        RADIAL_LENGTH,
+        RADIAL_LENGTH - radial_start,
+        cs=em.GCS.displace(0.0, 0.0, radial_start),
         Nsections=WIRE_SECTIONS,
         name=f"Radial{index + 1}",
     )
@@ -659,8 +677,19 @@ for index in range(RADIAL_COUNT):
         .set_material(em.lib.MET_COPPER)
         .foreground()
     )
-    radial.max_meshsize = 3 * WIRE_RADIUS
+    radial.max_meshsize = 10 * WIRE_RADIUS
     radials.append(radial)
+
+# The radial cylinders overlap one another and the hub at the origin. Fuse
+# them into one copper body so the preview and mesh contain a single ground
+# assembly instead of several intersecting solids.
+ground_system = em.geo.unite(
+    ground_hub,
+    *radials,
+).set_material(
+    em.lib.MET_COPPER
+).foreground()
+ground_system.max_meshsize = 10 * WIRE_RADIUS
 
 
 # ============================================================================
@@ -718,6 +747,11 @@ model.set_resolution(
     0.5
 )
 
+# The antenna is a thin, tightly curved swept volume.  Give Gmsh extra
+# resolution on curved boundary edges to avoid PLC self-intersections at the
+# coil/straight transitions.
+model.mesher.set_curved_boundary_meshing(20)
+
 
 # ============================================================================
 # GENERATE MESH
@@ -730,7 +764,13 @@ model.generate_mesh()
 if SHOW_MESH:
     print("Opening mesh preview...")
     print("Close the EMerge window to continue.")
-    model.view()
+    # Mesh mode uses a wireframe/edge display instead of the metallic
+    # material rendering, making the element layout visible on the coils and
+    # the coarser straight sections.
+    model.view(
+        plot_mesh=True,
+        volume_mesh=True,
+    )
 
 
 # ============================================================================

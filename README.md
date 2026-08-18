@@ -362,6 +362,9 @@ PORT_HEIGHT = 2 * mm
 
 The feed is used for the EMerge lumped port.
 
+The radial ground assembly uses an annular hub with a clearance hole around
+the feed, so the feed is not shorted into the radial copper.
+
 The default port impedance is:
 
 ```python
@@ -402,16 +405,25 @@ The absorbing boundary condition is applied to the outside surfaces of this regi
 
 ## Meshing
 
-The antenna conductor gets a local mesh constraint:
+The antenna conductor is kept as one continuous swept volume. Splitting it
+into touching coil and straight volumes causes Gmsh PLC errors for this thin
+wire in the current EMerge version, so it uses one reliable local mesh size:
 
 ```python
-antenna.max_meshsize = 3 * WIRE_RADIUS
+ANTENNA_MESH_SIZE = 3 * WIRE_RADIUS
 ```
 
 and the model also receives the global setting:
 
 ```python
 model.set_resolution(0.33)
+```
+
+For the thin curved wire, the script also increases Gmsh's curved-boundary
+meshing factor to reduce PLC errors at coil transitions:
+
+```python
+model.mesher.set_curved_boundary_meshing(20)
 ```
 
 Mesh settings strongly affect both simulation accuracy and run time.
@@ -454,6 +466,9 @@ To inspect the generated FEM mesh:
 ```python
 SHOW_MESH = True
 ```
+
+The preview is rendered in mesh wireframe mode, so element edges are visible
+instead of only the metallic material shading.
 
 For normal repeated simulations:
 
