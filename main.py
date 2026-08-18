@@ -1,5 +1,5 @@
 """
-Smooth two-coil loaded antenna in EMerge
+Smooth two-coil loaded antenna with four angled radials in EMerge
 =========================================
 
 Geometry:
@@ -60,6 +60,10 @@ MHz = 1e6
 
 WIRE_RADIUS = 1.0 * mm          # 1.5 mm diameter wire
 
+RADIAL_LENGTH = 86 * mm
+RADIAL_ANGLE = 45.0              # degrees below the horizontal
+RADIAL_COUNT = 4
+
 BOTTOM_LENGTH = 170 * mm
 
 COIL1_RADIUS = 10 * mm          # centerline radius
@@ -95,11 +99,10 @@ WIRE_SECTIONS = 8
 # ============================================================================
 
 F0 = 868 * MHz
-
-FREQ_START = 500 * MHz
-FREQ_STOP = 1500 * MHz
-FREQ_POINTS = 10
-# 39 points makes 868 MHz one of the actual sweep frequencies.
+FSPAN = 300 * MHz
+FREQ_START = F0 - FSPAN / 2
+FREQ_STOP = F0 + FSPAN / 2     
+FREQ_POINTS = 11
 
 PORT_HEIGHT = 2 * mm
 PORT_IMPEDANCE = 50.0
@@ -109,7 +112,7 @@ C0 = 299_792_458.0
 WAVELENGTH = C0 / F0
 AIR_MARGIN = 0.25 * WAVELENGTH
 
-SHOW_GEOMETRY = False
+SHOW_GEOMETRY = True
 SHOW_COIL_PREVIEW = False
 SHOW_MESH = False
 RUN_SOLVER = True
@@ -492,6 +495,8 @@ print(f"Centerline samples : {len(xpts)}")
 print(f"Wire diameter      : {2*WIRE_RADIUS/mm:.2f} mm")
 print(f"Antenna height     : {antenna_height/mm:.2f} mm")
 print(f"Overall height     : {zpts[-1]/mm:.2f} mm")
+print(f"Radials            : {RADIAL_COUNT} x {RADIAL_LENGTH/mm:.1f} mm")
+print(f"Radial angle       : {RADIAL_ANGLE:.1f} deg below horizontal")
 print()
 print(
     f"Coil 1 OD approx   : "
@@ -603,18 +608,76 @@ feed = (
 feed.max_meshsize = 3 * WIRE_RADIUS
 
 
+# Small copper hub gives the four radials a finite-area electrical/mechanical
+# connection to the feed instead of four zero-area point contacts.
+ground_hub = (
+    em.geo.Cylinder(
+        4 * WIRE_RADIUS,
+        PORT_HEIGHT / 2,
+        cs=em.GCS.displace(0.0, 0.0, 0.0),
+        Nsections=WIRE_SECTIONS,
+        name="GroundHub",
+    )
+    .set_material(em.lib.MET_COPPER)
+    .foreground()
+)
+ground_hub.max_meshsize = 3 * WIRE_RADIUS
+
+
+# ============================================================================
+# FOUR- RADIAL ANGLED GROUND PLANE
+#
+# Each radial starts at the feed origin and slopes downward.  The four
+# cylinders are arranged at 90-degree azimuth spacing, making a symmetric
+# ground plane around the vertical radiator.
+# ============================================================================
+
+radials = []
+radial_tilt = 90.0 + RADIAL_ANGLE
+
+for index in range(RADIAL_COUNT):
+    radial = em.geo.Cylinder(
+        WIRE_RADIUS,
+        RADIAL_LENGTH,
+        Nsections=WIRE_SECTIONS,
+        name=f"Radial{index + 1}",
+    )
+    radial = em.geo.rotate(
+        radial,
+        (0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        radial_tilt,
+    )
+    radial = em.geo.rotate(
+        radial,
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+        index * 360.0 / RADIAL_COUNT,
+    )
+    radial = (
+        radial
+        .set_material(em.lib.MET_COPPER)
+        .foreground()
+    )
+    radial.max_meshsize = 3 * WIRE_RADIUS
+    radials.append(radial)
+
+
 # ============================================================================
 # AIR REGION
 # ============================================================================
 
-xmin = np.min(xpts) - AIR_MARGIN
-xmax = np.max(xpts) + AIR_MARGIN
+radial_horizontal_span = RADIAL_LENGTH * np.cos(np.deg2rad(RADIAL_ANGLE))
 
-ymin = np.min(ypts) - AIR_MARGIN
-ymax = np.max(ypts) + AIR_MARGIN
+xmin = min(np.min(xpts), -radial_horizontal_span) - AIR_MARGIN
+xmax = max(np.max(xpts), radial_horizontal_span) + AIR_MARGIN
 
-# Keep bottom at z=0, matching the arrangement used in the EMerge helix demo.
-zmin = 0.0
+ymin = min(np.min(ypts), -radial_horizontal_span) - AIR_MARGIN
+ymax = max(np.max(ypts), radial_horizontal_span) + AIR_MARGIN
+
+# Leave clearance below the downward-sloping radial tips.
+radial_lowest_z = -RADIAL_LENGTH * np.sin(np.deg2rad(RADIAL_ANGLE))
+zmin = radial_lowest_z - AIR_MARGIN
 zmax = np.max(zpts) + AIR_MARGIN
 
 airbox = em.geo.Box(
@@ -652,7 +715,7 @@ model.mw.set_frequency_range(
 
 # Global wavelength-based mesh resolution.
 model.set_resolution(
-    0.33
+    0.5
 )
 
 
@@ -733,6 +796,28 @@ if RUN_SOLVER:
     s11 = np.asarray(glob.S(1, 1))
     s11_db = 20 * np.log10(np.maximum(np.abs(s11), 1e-12))
     finite_s11_db = s11_db[np.isfinite(s11_db)]
+
+    print()
+    print("S11 RESULTS")
+    print("----------------------------------------------------")
+    print("Frequency (MHz)   S11 (dB)")
+    print("----------------------------------------------------")
+    for frequency, value in zip(glob.freq, s11_db):
+        print(f"{frequency/MHz:10.3f}       {value:8.3f}")
+
+    target_index = int(np.argmin(np.abs(glob.freq - F0)))
+    minimum_index = int(np.nanargmin(s11_db))
+    print("----------------------------------------------------")
+    print(
+        f"Nearest to 868   : {glob.freq[target_index]/MHz:.3f} MHz, "
+        f"{s11_db[target_index]:.3f} dB "
+        f"(|S11|={abs(s11[target_index]):.5f})"
+    )
+    print(
+        f"Best in sweep    : {glob.freq[minimum_index]/MHz:.3f} MHz, "
+        f"{s11_db[minimum_index]:.3f} dB"
+    )
+    print("----------------------------------------------------")
 
     if finite_s11_db.size:
         s11_dblim = [
