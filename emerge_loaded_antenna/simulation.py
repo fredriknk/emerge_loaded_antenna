@@ -120,7 +120,10 @@ def build_model(
     if options.verbose:
         _print_design(design, path)
 
-    model = em.Simulation(options.model_name)
+    model = em.Simulation(
+        options.model_name,
+        loglevel="INFO" if options.verbose else "ERROR",
+    )
     model.check_version("2.8.4")
 
     antenna_curve = CompositeCurve(path.segments, name="AntennaCenterline")

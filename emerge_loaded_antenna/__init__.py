@@ -19,6 +19,7 @@ from .geometry import AntennaPath, CompositeCurve, build_centerline
 from .optimize import (
     DesignSpace,
     DesignVariable,
+    EvaluationCallback,
     EvaluationRecord,
     GainMatchObjective,
     S11Objective,
@@ -37,6 +38,7 @@ __all__ = [
     "CompositeCurve",
     "DesignSpace",
     "DesignVariable",
+    "EvaluationCallback",
     "EvaluationRecord",
     "FrequencySweep",
     "GainMatchObjective",

@@ -109,6 +109,19 @@ score = objective(space.initial_vector)
 geometry/solver failures into a finite penalty. See
 `examples/optimize_gain.py` for a SciPy differential-evolution example.
 
+Run the comprehensive 868 MHz search with:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py
+```
+
+Routine EMerge INFO messages are suppressed during the search. A compact
+progress line reports completion, elapsed time, ETA, failures, best S11 and
+best gain every ten evaluations. Every candidate is flushed to
+`optimization_results/evaluations.csv`, and the final design is written to
+`optimization_results/best_result.json`. Use `--report-every`, `--maxiter`,
+`--popsize`, `--seed`, and `--output` to control a run; `--help` lists them.
+
 EMerge and Gmsh use process-global model state. Sequential evaluations in one
 process are supported and tested. Use separate processes—not worker threads—
 for parallel optimization.

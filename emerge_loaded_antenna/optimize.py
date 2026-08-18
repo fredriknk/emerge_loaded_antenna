@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 
@@ -133,6 +133,14 @@ class EvaluationRecord:
     error: str | None = None
 
 
+EvaluationCallback = Callable[[EvaluationRecord], None]
+
+
+def _best_record(history: Sequence[EvaluationRecord]) -> EvaluationRecord | None:
+    successful = [record for record in history if record.error is None]
+    return min(successful, key=lambda record: record.score, default=None)
+
+
 class S11Objective:
     """Callable scalar objective for minimizers; more-negative S11 is better."""
 
@@ -142,6 +150,7 @@ class S11Objective:
         target_frequency: float = 868e6,
         options: SimulationOptions | None = None,
         failure_penalty: float = 100.0,
+        on_evaluation: EvaluationCallback | None = None,
     ):
         self.space = space
         self.target_frequency = target_frequency
@@ -160,7 +169,12 @@ class S11Objective:
             show_coil_preview=False,
         )
         self.failure_penalty = float(failure_penalty)
+        self.on_evaluation = on_evaluation
         self.history: list[EvaluationRecord] = []
+
+    @property
+    def best_record(self) -> EvaluationRecord | None:
+        return _best_record(self.history)
 
     def __call__(self, vector: Sequence[float]) -> float:
         values = tuple(float(value) for value in vector)
@@ -179,6 +193,8 @@ class S11Objective:
                 f"{type(error).__name__}: {error}",
             )
         self.history.append(record)
+        if self.on_evaluation is not None:
+            self.on_evaluation(record)
         return float(score)
 
 class GainMatchObjective:
@@ -193,6 +209,7 @@ class GainMatchObjective:
         gain_weight: float = 1.0,
         options: SimulationOptions | None = None,
         failure_penalty: float = 1_000.0,
+        on_evaluation: EvaluationCallback | None = None,
     ):
         self.space = space
         self.target_frequency = target_frequency
@@ -216,7 +233,12 @@ class GainMatchObjective:
             show_coil_preview=False,
         )
         self.failure_penalty = float(failure_penalty)
+        self.on_evaluation = on_evaluation
         self.history: list[EvaluationRecord] = []
+
+    @property
+    def best_record(self) -> EvaluationRecord | None:
+        return _best_record(self.history)
 
     def __call__(self, vector: Sequence[float]) -> float:
         values = tuple(float(value) for value in vector)
@@ -247,4 +269,6 @@ class GainMatchObjective:
                 f"{type(error).__name__}: {error}",
             )
         self.history.append(record)
+        if self.on_evaluation is not None:
+            self.on_evaluation(record)
         return float(score)

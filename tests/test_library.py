@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -9,7 +11,9 @@ from emerge_loaded_antenna import (
     AntennaDesign,
     DesignSpace,
     DesignVariable,
+    EvaluationRecord,
     FrequencySweep,
+    GainMatchObjective,
     SimulationOptions,
     build_centerline,
 )
@@ -69,6 +73,40 @@ class DesignTests(unittest.TestCase):
         options.validate()
         self.assertEqual(sweep.start, sweep.stop)
         self.assertEqual(sweep.points, 1)
+
+    def test_objective_reports_best_successful_record(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("middle_length", 180e-3, 260e-3),),
+        )
+        objective = GainMatchObjective(space)
+        objective.history.extend(
+            (
+                EvaluationRecord((0.20,), 1000.0, None, None, "mesh failed"),
+                EvaluationRecord((0.21,), -3.0, -11.0, 3.0),
+                EvaluationRecord((0.22,), -4.5, -10.5, 4.5),
+            )
+        )
+
+        self.assertEqual(objective.best_record, objective.history[-1])
+
+    def test_objective_calls_progress_callback(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("middle_length", 180e-3, 260e-3),),
+        )
+        reported = []
+        objective = GainMatchObjective(space, on_evaluation=reported.append)
+        fake_result = SimpleNamespace(
+            peak_gain_dbi=4.0,
+            s11_db_at=lambda frequency: -12.0,
+        )
+
+        with patch("emerge_loaded_antenna.optimize.simulate", return_value=fake_result):
+            score = objective((220e-3,))
+
+        self.assertEqual(score, -4.0)
+        self.assertEqual(reported, objective.history)
 
 
 if __name__ == "__main__":
