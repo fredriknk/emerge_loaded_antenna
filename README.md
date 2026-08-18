@@ -120,6 +120,10 @@ evolution populations, and divides the requested time budget between them:
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
 ```
 
+The wall-time conversion assumes roughly eight seconds per robust evaluation;
+override it with `--seconds-per-eval` if the live ETA on your machine settles
+substantially higher or lower.
+
 It searches straight lengths, both pitches, both coil radii, radial length and
 radial angle. S11 is constrained at 863, 868 and 873 MHz. Every run receives
 the saved winner as `x0`; each candidate is flushed to CSV and every new global

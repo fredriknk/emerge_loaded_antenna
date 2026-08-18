@@ -20,11 +20,11 @@ class CampaignTests(unittest.TestCase):
         args = Namespace(
             maxiter=None,
             hours=12.0,
-            seconds_per_eval=14.0,
+            seconds_per_eval=8.0,
             popsize=8,
         )
 
-        self.assertEqual(iterations_per_run(args, variables=9, run_count=4), 9)
+        self.assertEqual(iterations_per_run(args, variables=9, run_count=4), 17)
 
     def test_turn_cases_are_parsed_as_discrete_searches(self):
         self.assertEqual(

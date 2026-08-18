@@ -284,7 +284,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="divide an estimated wall-time budget across every case and seed",
     )
-    parser.add_argument("--seconds-per-eval", type=float, default=14.0)
+    parser.add_argument("--seconds-per-eval", type=float, default=8.0)
     parser.add_argument("--popsize", type=int, default=8)
     parser.add_argument("--seeds", type=parse_int_list, default=(2, 3, 4, 5))
     parser.add_argument(
