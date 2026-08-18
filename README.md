@@ -107,8 +107,12 @@ helix
 
 That represents an infinitely sharp bend, which is not representative of a real bent wire.
 
-This script instead gradually changes the rotational speed of the centerline.
+This script instead uses compact quintic Hermite connectors. Each connector
+starts vertically and arrives tangent to the constant-pitch helix. Its angular
+allowance is independent of pitch, so a 6 mm connector no longer consumes most
+of a tightly pitched turn or creates a broad sweeping elbow.
 
+<!-- Description of the superseded angular-velocity transition:
 The transition uses the quintic smoothstep function:
 
 ```text
@@ -139,6 +143,7 @@ for a straight wire to:
 for the normal helical section.
 
 This means that the generated mathematical path has smooth position, direction, and curvature through the transition.
+-->
 
 In practical terms:
 
@@ -195,6 +200,7 @@ COIL1_RADIUS = 10 * mm
 COIL1_TURNS = 6
 COIL1_PITCH = 3.0 * mm
 COIL1_TRANSITION = 6 * mm
+COIL1_TRANSITION_ANGLE = 45.0
 ```
 
 `COIL1_RADIUS` is measured from the helix axis to the **wire centerline**.
@@ -236,6 +242,9 @@ For example:
 `COIL1_TRANSITION` controls how gradually the wire enters and exits the helix.
 
 A larger value produces a gentler bend.
+
+`COIL1_TRANSITION_ANGLE` controls where each compact connector joins the
+constant-pitch helix. It is independent of pitch; 45 degrees is the default.
 
 ### Middle Straight
 
@@ -708,10 +717,12 @@ and the outside diameter is approximately:
 21.5 mm
 ```
 
-### Transition Length Is Part of the Coil
+### Transition Length Is Independent of Pitch
 
-The transition sections are included in the requested coil's total axial length.
+The entrance and exit connector lengths are added around the constant-pitch
+portion. They are no longer required to be shorter than `turns * pitch`.
 
+<!-- Superseded total-height example:
 For:
 
 ```text
@@ -724,8 +735,12 @@ the total coil height remains:
 ```text
 18 mm
 ```
+-->
 
-The script redistributes part of the angular rotation into the smooth entrance and exit sections rather than simply adding extra transition length to the antenna.
+The two connectors use a fixed angular allowance set by
+`COIL1_TRANSITION_ANGLE`; the remaining requested rotation uses the specified
+constant pitch. Consequently, connector length can be selected for bend
+quality without imposing a minimum coil pitch.
 
 ### Integer Turns
 
