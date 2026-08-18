@@ -43,7 +43,7 @@ The package is intended for:
 Install the project in editable mode inside the existing virtual environment:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify]"
 ```
 
 ## Library API
@@ -104,23 +104,59 @@ objective = S11Objective(space, target_frequency=868e6)
 score = objective(space.initial_vector)
 ```
 
-`GainMatchObjective` adds a configurable S11 constraint penalty and maximizes
-3D peak isotropic gain. Both objectives retain evaluation history and convert
-geometry/solver failures into a finite penalty. See
-`examples/optimize_gain.py` for a SciPy differential-evolution example.
+`GainMatchObjective` retains the original peak-anywhere objective.
+`RobustGainObjective` can instead maximize 10th-percentile horizon gain or gain
+in a requested direction while penalizing worst-band mismatch, azimuth ripple,
+deep nulls and excessive height. All objectives retain evaluation history and
+convert geometry/solver failures into a finite penalty.
 
-Run the comprehensive 868 MHz search with:
+### Twelve-hour robust campaign
+
+The recommended campaign warm-starts from
+`optimization_results/best_result.json`, runs four independent differential-
+evolution populations, and divides the requested time budget between them:
 
 ```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
 ```
 
-Routine EMerge INFO messages are suppressed during the search. A compact
-progress line reports completion, elapsed time, ETA, failures, best S11 and
-best gain every ten evaluations. Every candidate is flushed to
-`optimization_results/evaluations.csv`, and the final design is written to
-`optimization_results/best_result.json`. Use `--report-every`, `--maxiter`,
-`--popsize`, `--seed`, and `--output` to control a run; `--help` lists them.
+It searches straight lengths, both pitches, both coil radii, radial length and
+radial angle. S11 is constrained at 863, 868 and 873 MHz. Every run receives
+the saved winner as `x0`; each candidate is flushed to CSV and every new global
+best is atomically checkpointed as `campaign_best.json`. Output goes into a
+new timestamped directory so previous campaigns are never overwritten.
+
+Coil turns are discontinuous geometry choices and are therefore separate
+searches rather than rounded continuous variables. To divide a campaign over
+selected cases:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --hours 12 `
+    --turn-cases 1x1,1x2,2x1,2x2,3x3
+```
+
+For best convergence, first run a full campaign for `1x1`, then give promising
+turn cases their own campaign. `--pattern directional --target-theta ...
+--target-phi ...` selects a fixed beam direction; `--pattern peak` restores
+unrestricted maximum-gain optimization. Run `--help` for all objective weights
+and budget controls.
+
+### Final verification
+
+Never accept an optimizer's coarse-mesh number without convergence testing.
+Verify a campaign winner with:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\verify_best.py `
+    .\optimization_results\robust_YYYYMMDD_HHMMSS\campaign_best.json `
+    --show-3d
+```
+
+This repeats the design on coarse and fine meshes, samples the 3D pattern at
+0.5-degree resolution, sweeps 853-883 MHz, reports peak direction and horizon
+statistics, and saves S11, XY/horizon and XZ/YZ/XY plots plus JSON convergence
+data.
 
 EMerge and Gmsh use process-global model state. Sequential evaluations in one
 process are supported and tested. Use separate processes—not worker threads—
@@ -614,10 +650,10 @@ or, more realistically:
 minimize worst-case S11 from 863–870 MHz
 ```
 
-`S11Objective` and `GainMatchObjective` are directly callable by SciPy and
-other minimizers. They decode vectors, validate and simulate candidates, keep
-history, and return a finite penalty when a candidate cannot be meshed or
-solved.
+`S11Objective`, `GainMatchObjective`, and `RobustGainObjective` are directly
+callable by SciPy and other minimizers. They decode vectors, validate and
+simulate candidates, keep history, invoke optional per-evaluation callbacks,
+and return a finite penalty when a candidate cannot be meshed or solved.
 
 A typical workflow could become:
 
