@@ -17,7 +17,8 @@ Geometry:
             feed
 
 The ENTIRE antenna conductor above the feed is generated as one continuous
-3D spline and swept with a circular wire cross-section.
+composite wire and swept once with a circular wire cross-section. Exact lines
+and local Bezier pieces replace the former artifact-prone global BSpline.
 
 The straight -> helix and helix -> straight transitions use compact cubic
 Hermite connectors with a small local sideways offset. The offset is
@@ -39,7 +40,9 @@ if _venv_mkl is not None:
 
 import numpy as np
 import emerge as em
+import gmsh
 
+from emerge._emerge.geometry import GeoEdge
 from emerge.plot import plot_sp, plot_ff, smith
 
 
@@ -58,7 +61,7 @@ MHz = 1e6
 # Change these first.
 # ============================================================================
 
-WIRE_RADIUS = 1.0 * mm          # 1.5 mm diameter wire
+WIRE_RADIUS = 1.0 * mm          # 2.0 mm diameter wire
 
 RADIAL_LENGTH = 72 * mm
 RADIAL_ANGLE = 45.0              # degrees below the horizontal
@@ -87,18 +90,17 @@ TOP_LENGTH = BOTTOM_LENGTH
 # GEOMETRY RESOLUTION
 # ============================================================================
 
-# Number of centerline samples for every complete revolution. Two-turn coils
-# need at least 20 here to keep the swept boundary robust in Gmsh.
+# Preview samples per turn. The actual CAD helix uses three independent cubic
+# Bezier arcs per turn, so this no longer increases CAD or mesh complexity.
 POINTS_PER_TURN = 20
 
 # Number of polygon sides approximating the circular wire.
 # Higher = rounder but heavier mesh.
 WIRE_SECTIONS = 6
 
-# Mesh size for the single continuous swept conductor. Two-turn coils need a
-# slightly finer boundary mesh than the 3-radius setting used for one turn.
-# Keeping one sweep is important: separate touching sweeps trigger PLC errors.
-ANTENNA_MESH_SIZE = 2.5 * WIRE_RADIUS
+# Longitudinal mesh target for the single continuous swept conductor. The
+# composite path remains robust at 3 radii for both one- and two-turn coils.
+ANTENNA_MESH_SIZE = 3.0 * WIRE_RADIUS
 
 
 # ============================================================================
@@ -130,72 +132,8 @@ FARFIELD_DB_FLOOR = -30
 
 
 # ============================================================================
-# SMOOTH TRANSITION FUNCTIONS
+# LOCAL CURVE HELPERS
 # ============================================================================
-
-def smoothstep5(u):
-    """
-    Quintic smoothstep:
-
-        S(0) = 0
-        S(1) = 1
-
-    and both first and second derivatives behave smoothly at the ends.
-
-    Used here as the normalized ANGULAR VELOCITY of the wire.
-    """
-    return 10*u**3 - 15*u**4 + 6*u**5
-
-
-def smoothstep5_integral(u):
-    """
-    Integral of smoothstep5 from 0 -> u.
-
-    F(u) = integral(S(u) du)
-
-    F(0) = 0
-    F(1) = 0.5
-    """
-    return 2.5*u**4 - 3*u**5 + u**6
-
-
-def quintic_hermite(p0, p1, v0, v1, a0, a1, u):
-    """C2-continuous vector blend with specified end derivatives."""
-    p0 = np.asarray(p0, dtype=float)
-    p1 = np.asarray(p1, dtype=float)
-    v0 = np.asarray(v0, dtype=float)
-    v1 = np.asarray(v1, dtype=float)
-    a0 = np.asarray(a0, dtype=float)
-    a1 = np.asarray(a1, dtype=float)
-
-    c0 = p0
-    c1 = v0
-    c2 = 0.5 * a0
-    rhs = np.stack(
-        (
-            p1 - c0 - c1 - c2,
-            v1 - c1 - 2*c2,
-            a1 - 2*c2,
-        )
-    )
-    matrix = np.array(
-        (
-            (1.0, 1.0, 1.0),
-            (3.0, 4.0, 5.0),
-            (6.0, 12.0, 20.0),
-        )
-    )
-    c3, c4, c5 = np.linalg.solve(matrix, rhs)
-
-    u = np.asarray(u, dtype=float)[:, None]
-    return (
-        c0
-        + c1*u
-        + c2*u**2
-        + c3*u**3
-        + c4*u**4
-        + c5*u**5
-    )
 
 
 def cubic_hermite(p0, p1, v0, v1, u):
@@ -214,6 +152,73 @@ def cubic_hermite(p0, p1, v0, v1, u):
     )
 
 
+def cubic_bezier_controls(p0, p1, v0, v1):
+    """Convert cubic Hermite endpoints/derivatives to four Bezier controls."""
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+    v1 = np.asarray(v1, dtype=float)
+    return np.vstack((p0, p0 + v0/3, p1 - v1/3, p1))
+
+
+class CompositeCurve(em.geo.Curve):
+    """One OpenCASCADE wire assembled from independent local curve pieces."""
+
+    def __init__(self, segments, name="CompositeCurve"):
+        if not segments:
+            raise ValueError("A composite curve needs at least one segment.")
+
+        edge_tags = []
+        point_tags = []
+        last_point_tag = None
+        last_point = None
+
+        for kind, coordinates in segments:
+            coordinates = np.asarray(coordinates, dtype=float)
+            if last_point is not None:
+                if np.linalg.norm(coordinates[0] - last_point) > 1e-9:
+                    raise ValueError("Composite curve segments are not connected.")
+                coordinates = coordinates.copy()
+                coordinates[0] = last_point
+
+            if last_point_tag is None:
+                last_point_tag = gmsh.model.occ.addPoint(*coordinates[0])
+                point_tags.append(last_point_tag)
+
+            local_tags = [last_point_tag]
+            for point in coordinates[1:]:
+                tag = gmsh.model.occ.addPoint(*point)
+                point_tags.append(tag)
+                local_tags.append(tag)
+
+            if kind == "line":
+                if len(local_tags) != 2:
+                    raise ValueError("A line segment needs exactly two points.")
+                edge_tag = gmsh.model.occ.addLine(*local_tags)
+            elif kind == "bezier":
+                if len(local_tags) != 4:
+                    raise ValueError("A cubic Bezier needs exactly four controls.")
+                edge_tag = gmsh.model.occ.addBezier(local_tags)
+            else:
+                raise ValueError(f"Unknown composite segment type: {kind}")
+
+            edge_tags.append(edge_tag)
+            last_point_tag = local_tags[-1]
+            last_point = coordinates[-1]
+
+        wire_tag = gmsh.model.occ.addWire(edge_tags, checkClosed=False)
+        gmsh.model.occ.remove([(0, tag) for tag in point_tags])
+
+        first = np.asarray(segments[0][1][0], dtype=float)
+        last = np.asarray(segments[-1][1][-1], dtype=float)
+        self.xpts = np.array((first[0], last[0]))
+        self.ypts = np.array((first[1], last[1]))
+        self.zpts = np.array((first[2], last[2]))
+        self.dstart = (0.0, 0.0, 1.0)
+        GeoEdge.__init__(self, wire_tag, name=name)
+        gmsh.model.occ.synchronize()
+
+
 # ============================================================================
 # CENTERLINE BUILDER
 # ============================================================================
@@ -223,6 +228,7 @@ class AntennaPath:
         self.x = []
         self.y = []
         self.z = []
+        self.segments = []
         self.current_x = x
         self.current_y = y
         self.current_z = z
@@ -232,6 +238,18 @@ class AntennaPath:
             np.array([y]),
             np.array([z]),
         )
+
+    def _add_segment(self, kind, coordinates):
+        coordinates = np.asarray(coordinates, dtype=float)
+        if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+            raise ValueError("Segment coordinates must have shape (N, 3).")
+        if self.segments:
+            previous_end = self.segments[-1][1][-1]
+            if np.linalg.norm(coordinates[0] - previous_end) > 1e-9:
+                raise ValueError("Centerline segments must meet exactly.")
+            coordinates = coordinates.copy()
+            coordinates[0] = previous_end
+        self.segments.append((kind, coordinates))
 
     def _append(self, x, y, z):
         """
@@ -262,245 +280,24 @@ class AntennaPath:
             self.current_y = float(y[-1])
             self.current_z = float(z[-1])
 
-    def straight(self, length, points=8):
-        """
-        Add a vertical straight section with local BSpline guard points.
-
-        The long interior remains coarse, while a few closely spaced control
-        points at each end prevent a neighbouring coil from pulling the
-        global BSpline into a long, visibly bent "straight" section.
-        """
+    def straight(self, length):
+        """Add one exact line; its length does not increase CAD complexity."""
 
         if length <= 0:
             return
 
-        coarse_s = np.linspace(0.0, length, points)
-        guard_offsets = WIRE_RADIUS*np.array((0.0, 0.5, 1.0, 2.0, 4.0))
-        guard_offsets = guard_offsets[guard_offsets <= 0.5*length]
-        s = np.unique(
-            np.concatenate(
-                (coarse_s, guard_offsets, length - guard_offsets)
+        coordinates = np.array(
+            (
+                (self.current_x, self.current_y, self.current_z),
+                (self.current_x, self.current_y, self.current_z + length),
             )
         )
-        z = self.current_z + s
-
-        x = np.full_like(z, self.current_x)
-        y = np.full_like(z, self.current_y)
-
-        self._append(x, y, z)
-    def _coil_legacy(
-        self,
-        radius,
-        turns,
-        pitch,
-        transition,
-        handedness="RH",
-        points_per_turn=32,
-    ):
-        """
-        Add one smooth helical loading coil.
-
-        The straight wire enters vertically.
-
-        Angular velocity smoothly changes:
-
-            0
-            ↓
-            helix angular velocity
-            ↓
-            0
-
-        Therefore there is NO sharp straight-to-helix corner.
-
-        The coil center is offset horizontally so that an integer number
-        of turns returns exactly to the incoming straight-wire position.
-
-        Parameters
-        ----------
-        radius:
-            Helix centerline radius.
-
-        turns:
-            Number of full 360-degree turns. Must be a positive integer
-            if the outgoing straight is to return to the same line.
-
-        pitch:
-            Axial rise per turn in the constant-pitch part.
-
-        transition:
-            Length of each smooth transition zone.
-
-        handedness:
-            "RH" or "LH".
-        """
-
-        if radius <= 0:
-            raise ValueError("Coil radius must be > 0.")
-
-        if pitch <= 0:
-            raise ValueError("Coil pitch must be > 0.")
-
-        if transition <= 0:
-            raise ValueError(
-                "Transition must be > 0. "
-                "A zero transition would produce the sharp bend "
-                "we are deliberately avoiding."
-            )
-
-        if int(turns) != turns or turns <= 0:
-            raise ValueError(
-                "turns must be a positive integer so the coil returns "
-                "to the same straight-line location."
-            )
-
-        turns = int(turns)
-
-        nominal_coil_length = turns * pitch
-
-        if transition >= nominal_coil_length:
-            raise ValueError(
-                f"Transition ({transition/mm:.2f} mm) is too long for "
-                f"{turns} turns × {pitch/mm:.2f} mm pitch."
-            )
-
-        if handedness.upper() == "RH":
-            sign = 1.0
-        elif handedness.upper() == "LH":
-            sign = -1.0
-        else:
-            raise ValueError("handedness must be 'RH' or 'LH'.")
-
-        omega = sign * 2*np.pi / pitch
-
-        # ---------------------------------------------------------------
-        # Geometry concept
-        #
-        # Incoming straight wire is at:
-        #
-        #       x = x0
-        #       y = y0
-        #
-        # Put the coil's rotation axis one radius to the -X side:
-        #
-        #       center_x = x0 - radius
-        #
-        # Therefore theta = 0 corresponds exactly to x0,y0.
-        # After an integer number of revolutions it returns to x0,y0.
-        # ---------------------------------------------------------------
-
-        x0 = self.current_x
-        y0 = self.current_y
-        z0 = self.current_z
-
-        center_x = x0 - radius
-        center_y = y0
-
-        # ---------------------------------------------------------------
-        # SECTION 1:
-        # Smoothly accelerate from vertical line into full helix.
-        # ---------------------------------------------------------------
-
-        n_transition = max(
-            16,
-            int(
-                np.ceil(
-                    points_per_turn * transition / pitch
-                )
-            ) + 1,
+        self._add_segment("line", coordinates)
+        self._append(
+            coordinates[:, 0],
+            coordinates[:, 1],
+            coordinates[:, 2],
         )
-
-        u = np.linspace(0.0, 1.0, n_transition)
-
-        z_in = z0 + transition*u
-
-        theta_in = (
-            omega
-            * transition
-            * smoothstep5_integral(u)
-        )
-
-        x_in = center_x + radius*np.cos(theta_in)
-        y_in = center_y + radius*np.sin(theta_in)
-
-        self._append(x_in, y_in, z_in)
-
-        theta = theta_in[-1]
-        zpos = z_in[-1]
-
-        # ---------------------------------------------------------------
-        # SECTION 2:
-        # Constant-pitch helix.
-        #
-        # Each transition contributes half of its length in angular
-        # rotation. Together they contribute one transition-length.
-        #
-        # So this middle section is:
-        #
-        #       turns*pitch - transition
-        #
-        # This ensures TOTAL rotation remains exactly N × 360 degrees.
-        # ---------------------------------------------------------------
-
-        middle_length = nominal_coil_length - transition
-
-        n_middle = max(
-            8,
-            int(
-                np.ceil(
-                    points_per_turn * middle_length / pitch
-                )
-            ) + 1,
-        )
-
-        s = np.linspace(0.0, middle_length, n_middle)
-
-        theta_mid = theta + omega*s
-        z_mid = zpos + s
-
-        x_mid = center_x + radius*np.cos(theta_mid)
-        y_mid = center_y + radius*np.sin(theta_mid)
-
-        self._append(x_mid, y_mid, z_mid)
-
-        theta = theta_mid[-1]
-        zpos = z_mid[-1]
-
-        # ---------------------------------------------------------------
-        # SECTION 3:
-        # Smoothly decelerate helix rotation back to vertical.
-        #
-        # Angular velocity is:
-        #
-        #       omega * (1 - smoothstep5(u))
-        #
-        # ---------------------------------------------------------------
-
-        u = np.linspace(0.0, 1.0, n_transition)
-
-        z_out = zpos + transition*u
-
-        theta_out = (
-            theta
-            + omega
-            * transition
-            * (
-                u - smoothstep5_integral(u)
-            )
-        )
-
-        x_out = center_x + radius*np.cos(theta_out)
-        y_out = center_y + radius*np.sin(theta_out)
-
-        self._append(x_out, y_out, z_out)
-        # Because turns is integer, numerical noise aside, the final point
-        # should equal x0,y0. Force the exact location to avoid tiny drift.
-        self.x[-1] = x0
-        self.y[-1] = y0
-
-        self.current_x = x0
-        self.current_y = y0
-        self.current_z = float(z_out[-1])
-
     def coil(
         self,
         radius,
@@ -576,8 +373,18 @@ class AntennaPath:
             )
         )
         d_in_1 /= np.linalg.norm(d_in_1)
-        vertical_handle = 0.75*transition
-        helix_handle = 1.75*transition
+        # These handle lengths distribute curvature across the connector
+        # instead of concentrating a hook near either endpoint. For the
+        # default geometry the minimum centerline bend radius is ~4.6 mm.
+        vertical_handle = 1.60*transition
+        helix_handle = 1.45*transition
+        controls_in = cubic_bezier_controls(
+            p_in_0,
+            p_in_1,
+            vertical_handle*d_in_0,
+            helix_handle*d_in_1,
+        )
+        self._add_segment("bezier", controls_in)
         path_in = cubic_hermite(
             p_in_0,
             p_in_1,
@@ -600,6 +407,61 @@ class AntennaPath:
         y_mid = center_y + radius*np.sin(theta_mid)
         self._append(x_mid, y_mid, z_mid)
 
+        # Approximate the constant-pitch helix with independent Bezier arcs no
+        # longer than 120 degrees. Each arc has exact endpoints and helix
+        # tangents; unlike a global BSpline, it cannot deform a straight or a
+        # neighbouring transition.
+        arc_count = max(
+            1,
+            int(np.ceil(abs(middle_rotation) / (2*np.pi/3))),
+        )
+        theta_edges = np.linspace(
+            alpha,
+            alpha + middle_rotation,
+            arc_count + 1,
+        )
+        for theta_a, theta_b in zip(theta_edges[:-1], theta_edges[1:]):
+            z_a = p_in_1[2] + (theta_a - alpha)/omega
+            z_b = p_in_1[2] + (theta_b - alpha)/omega
+            point_a = np.array(
+                (
+                    center_x + radius*np.cos(theta_a),
+                    center_y + radius*np.sin(theta_a),
+                    z_a,
+                )
+            )
+            point_b = np.array(
+                (
+                    center_x + radius*np.cos(theta_b),
+                    center_y + radius*np.sin(theta_b),
+                    z_b,
+                )
+            )
+            bezier_factor = 4/3*np.tan((theta_b - theta_a)/4)
+            tangent_a = np.array(
+                (
+                    -radius*np.sin(theta_a),
+                    radius*np.cos(theta_a),
+                    1/omega,
+                )
+            )
+            tangent_b = np.array(
+                (
+                    -radius*np.sin(theta_b),
+                    radius*np.cos(theta_b),
+                    1/omega,
+                )
+            )
+            helix_controls = np.vstack(
+                (
+                    point_a,
+                    point_a + bezier_factor*tangent_a,
+                    point_b - bezier_factor*tangent_b,
+                    point_b,
+                )
+            )
+            self._add_segment("bezier", helix_controls)
+
         # Exit connector: helix -> outgoing vertical line.
         beta = alpha + middle_rotation
         z_out_start = float(z_mid[-1])
@@ -620,6 +482,13 @@ class AntennaPath:
         )
         d_out_0 /= np.linalg.norm(d_out_0)
         d_out_1 = np.array((0.0, 0.0, 1.0))
+        controls_out = cubic_bezier_controls(
+            p_out_0,
+            p_out_1,
+            helix_handle*d_out_0,
+            vertical_handle*d_out_1,
+        )
+        self._add_segment("bezier", controls_out)
         path_out = cubic_hermite(
             p_out_0,
             p_out_1,
@@ -698,7 +567,8 @@ print()
 print("----------------------------------------------------")
 print("ANTENNA")
 print("----------------------------------------------------")
-print(f"Centerline samples : {len(xpts)}")
+print(f"CAD path segments  : {len(path_builder.segments)}")
+print(f"Preview samples    : {len(xpts)}")
 print(f"Wire diameter      : {2*WIRE_RADIUS/mm:.2f} mm")
 print(f"Antenna height     : {antenna_height/mm:.2f} mm")
 print(f"Overall height     : {zpts[-1]/mm:.2f} mm")
@@ -731,17 +601,15 @@ model.check_version(
 
 
 # ============================================================================
-# CREATE ONE CONTINUOUS XYZ SPLINE AND SWEEP THE WIRE
+# CREATE ONE CONTINUOUS COMPOSITE WIRE AND SWEEP THE WIRE
 #
-# Keeping this as one swept volume avoids coincident end faces at the
-# coil/straight joins, which can trigger Gmsh PLC errors for thin wires.
+# Exact line and local Bezier pieces prevent one global spline from deforming
+# neighbouring sections. They are joined into one wire before the single pipe
+# operation, avoiding coincident end faces and PLC errors.
 # ============================================================================
 
-antenna_curve = em.geo.Curve(
-    xpts,
-    ypts,
-    zpts,
-    ctype="BSpline",
+antenna_curve = CompositeCurve(
+    path_builder.segments,
     name="AntennaCenterline",
 )
 
@@ -937,10 +805,9 @@ model.set_resolution(
     0.5
 )
 
-# The antenna is a thin, tightly curved swept volume.  Give Gmsh extra
-# resolution on curved boundary edges to avoid PLC self-intersections at the
-# coil/straight transitions.
-model.mesher.set_curved_boundary_meshing(20)
+# Twelve segments per full curved-boundary revolution preserves the coil shape
+# without the heavy factor-20 workaround required by the former global spline.
+model.mesher.set_curved_boundary_meshing(12)
 
 
 # ============================================================================
@@ -951,15 +818,25 @@ print("Generating mesh...")
 
 model.generate_mesh()
 
+mesh_node_count = len(gmsh.model.mesh.getNodes()[0])
+mesh_element_count = sum(
+    len(block) for block in gmsh.model.mesh.getElements()[1]
+)
+mesh_volume_count = sum(
+    len(block) for block in gmsh.model.mesh.getElements(3)[1]
+)
+print(f"Mesh nodes          : {mesh_node_count}")
+print(f"Mesh elements       : {mesh_element_count}")
+print(f"Volume elements     : {mesh_volume_count}")
+
 if SHOW_MESH:
     print("Opening mesh preview...")
     print("Close the EMerge window to continue.")
-    # Mesh mode uses a wireframe/edge display instead of the metallic
-    # material rendering, making the element layout visible on the coils and
-    # the coarser straight sections.
+    # Show boundary triangles only. Internal air-volume tetrahedra create a
+    # dense web of crossing lines that looks like geometry artifacts.
     model.view(
         plot_mesh=True,
-        volume_mesh=True,
+        volume_mesh=False,
     )
 
 

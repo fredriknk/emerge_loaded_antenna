@@ -26,7 +26,11 @@ The antenna geometry consists of:
             Feed
 ```
 
-The important feature is that the straight sections and coils are **not joined by sharp corners**. Instead, the entire antenna is generated as one smooth 3D centerline and then swept with a circular wire cross-section.
+The important feature is that the straight sections and coils are **not joined
+by sharp corners**. Exact lines and local cubic Bezier pieces are assembled
+into one continuous OpenCASCADE wire, then swept once with a circular wire
+cross-section. Each piece is independent, so a coil cannot bend a distant
+straight section as it could with one global BSpline.
 
 ## Requirements
 
@@ -303,28 +307,20 @@ Both coils can use the same handedness or different handedness.
 
 ## Geometry Resolution
 
-### Centerline Points
+### Preview Sampling
 
 ```python
 POINTS_PER_TURN = 20
 ```
 
-This controls how densely the helix is sampled before creating the EMerge
-spline. Two-turn coils need at least 20 samples per turn with the current
-geometry to avoid Gmsh PLC errors.
-
-Higher values provide a more accurate representation but increase geometry complexity.
-
-A reasonable starting point is:
-
-```text
-24–48 points per turn
-```
+This controls only the sampled coordinates used for reporting dimensions and
+computing the air-box bounds. It does not control the CAD or mesh complexity.
+The actual helix uses three tangent-continuous cubic Bezier arcs per turn.
 
 ### Wire Cross-Section
 
 ```python
-WIRE_SECTIONS = 8
+WIRE_SECTIONS = 6
 ```
 
 The circular wire cross-section is represented by a polygon.
@@ -420,29 +416,35 @@ The absorbing boundary condition is applied to the outside surfaces of this regi
 
 ## Meshing
 
-The antenna conductor is kept as one continuous swept volume. Splitting it
-into touching coil and straight volumes causes Gmsh PLC errors for this thin
-wire in the current EMerge version, so it uses one reliable local mesh size:
+The antenna conductor remains one continuous swept volume. Its path is a
+composite wire of exact straight lines, local transition curves, and three
+Bezier arcs per helical turn. This avoids both coincident-volume PLC errors and
+the excessive triangulation caused by the former global BSpline.
 
 ```python
-ANTENNA_MESH_SIZE = 2.5 * WIRE_RADIUS
+ANTENNA_MESH_SIZE = 3.0 * WIRE_RADIUS
 ```
 
-The 2.5-radius setting is required for the tested two-turn coils; the previous
-3-radius setting remains adequate for the simpler one-turn geometry.
+The 3-radius setting is tested with both one- and two-turn coils.
 
 and the model also receives the global setting:
 
 ```python
-model.set_resolution(0.33)
+model.set_resolution(0.5)
 ```
 
-For the thin curved wire, the script also increases Gmsh's curved-boundary
-meshing factor to reduce PLC errors at coil transitions:
+The curved-boundary factor is now moderate because it no longer has to repair
+a distorted global spline:
 
 ```python
-model.mesher.set_curved_boundary_meshing(20)
+model.mesher.set_curved_boundary_meshing(12)
 ```
+
+With the current example geometry, the old global-spline mesh used 7,595 nodes
+and 54,925 total elements. The composite path uses 3,048 nodes and 22,734
+elements for one-turn coils. Two-turn coils use 3,521 nodes and 26,586
+elements. The script prints current node, total-element, and volume-element
+counts after every mesh build.
 
 Mesh settings strongly affect both simulation accuracy and run time.
 
@@ -485,8 +487,10 @@ To inspect the generated FEM mesh:
 SHOW_MESH = True
 ```
 
-The preview is rendered in mesh wireframe mode, so element edges are visible
-instead of only the metallic material shading.
+The preview renders boundary triangles in wireframe mode, so element edges are
+visible instead of only the metallic material shading. Internal air-volume
+tetrahedra are intentionally hidden; displaying them produces the dense web of
+crossing magenta lines that can be mistaken for geometry artifacts.
 
 For normal repeated simulations:
 
@@ -751,10 +755,9 @@ quality without imposing a minimum coil pitch. The exact axial height is:
 
 where `join_angle = 2 x asin(offset / (2 x radius))` in radians.
 
-The long straight sections remain coarsely sampled. Only five local BSpline
-guard points are added within four wire radii of each end. These keep the
-straight wire pinned at a coil junction without applying fine resolution over
-its full length.
+Each long straight is one exact CAD line with only two endpoints. Its length
+therefore does not increase centerline complexity, and no guard points are
+needed to keep it straight at a coil junction.
 
 ### Integer Turns
 
