@@ -60,18 +60,18 @@ MHz = 1e6
 
 WIRE_RADIUS = 1.0 * mm          # 1.5 mm diameter wire
 
-RADIAL_LENGTH = 86 * mm
+RADIAL_LENGTH = 72 * mm
 RADIAL_ANGLE = 45.0              # degrees below the horizontal
 RADIAL_COUNT = 4
 
-BOTTOM_LENGTH = 170 * mm
+BOTTOM_LENGTH = 140 * mm
 
 COIL1_RADIUS = 10 * mm          # centerline radius
 COIL1_TURNS = 1                 # integer turns
 COIL1_PITCH = 7.0 * mm          # axial rise per full turn
 COIL1_TRANSITION = 6 * mm       # smooth entrance/exit distance
 
-MIDDLE_LENGTH = BOTTOM_LENGTH
+MIDDLE_LENGTH = 221 * mm    
 
 COIL2_RADIUS = COIL1_RADIUS
 COIL2_TURNS = COIL1_TURNS
@@ -85,17 +85,18 @@ TOP_LENGTH = BOTTOM_LENGTH
 # GEOMETRY RESOLUTION
 # ============================================================================
 
-# Number of centerline samples for every complete revolution.
-# 32 is a reasonable starting point.
-POINTS_PER_TURN = 16
+# Number of centerline samples for every complete revolution. Two-turn coils
+# need at least 20 here to keep the swept boundary robust in Gmsh.
+POINTS_PER_TURN = 20
 
 # Number of polygon sides approximating the circular wire.
 # Higher = rounder but heavier mesh.
 WIRE_SECTIONS = 6
 
-# Mesh size for the single continuous swept conductor.  Keeping one sweep is
-# important here: separate touching sweeps trigger Gmsh PLC errors.
-ANTENNA_MESH_SIZE = 3 * WIRE_RADIUS
+# Mesh size for the single continuous swept conductor. Two-turn coils need a
+# slightly finer boundary mesh than the 3-radius setting used for one turn.
+# Keeping one sweep is important: separate touching sweeps trigger PLC errors.
+ANTENNA_MESH_SIZE = 2.5 * WIRE_RADIUS
 
 
 # ============================================================================
@@ -103,10 +104,10 @@ ANTENNA_MESH_SIZE = 3 * WIRE_RADIUS
 # ============================================================================
 
 F0 = 868 * MHz
-FSPAN = 300 * MHz
+FSPAN = 100 * MHz
 FREQ_START = F0 - FSPAN / 2
 FREQ_STOP = F0 + FSPAN / 2     
-FREQ_POINTS = 11
+FREQ_POINTS = 5
 
 PORT_HEIGHT = 2 * mm
 PORT_IMPEDANCE = 50.0
@@ -116,10 +117,14 @@ C0 = 299_792_458.0
 WAVELENGTH = C0 / F0
 AIR_MARGIN = 0.25 * WAVELENGTH
 
-SHOW_GEOMETRY = True
-SHOW_COIL_PREVIEW = True
+SHOW_GEOMETRY = False
+SHOW_COIL_PREVIEW = False
 SHOW_MESH = True
 RUN_SOLVER = True
+SHOW_3D_FARFIELD = True
+
+
+FARFIELD_DB_FLOOR = -30
 
 
 # ============================================================================
@@ -579,9 +584,10 @@ if SHOW_COIL_PREVIEW:
 # ============================================================================
 # FEED
 #
-# This follows the feed approach from EMerge's helix antenna example.
-# The antenna spline starts at z = PORT_HEIGHT, so the feed extrusion
-# reaches directly from z=0 to the antenna.
+# This is the non-metal lumped-port region, following EMerge's helix antenna
+# example. It spans from the grounded hub at z=0 to the radiator at
+# z=PORT_HEIGHT. Making this volume copper suppresses the imposed port field
+# and produces |S11| ~= 1 at every frequency.
 # ============================================================================
 
 feed_poly = em.geo.XYPolygon.circle(
@@ -600,52 +606,35 @@ feed = (
         ),
         name="Feed",
     )
-    .set_material(
-        em.lib.MET_COPPER
-    )
     .foreground()
 )
 
 feed.max_meshsize = 3 * WIRE_RADIUS
 
 
-# Annular copper hub for the radials.  The center hole keeps the signal feed
-# electrically separate from the radial ground assembly.
+# Solid copper hub beneath the non-metal feed region. Its top face at z=0 is
+# the lumped port's ground reference; the radiator starts at z=PORT_HEIGHT.
 GROUND_HUB_OUTER_RADIUS = 4 * WIRE_RADIUS
-GROUND_HUB_INNER_RADIUS = 1.5 * WIRE_RADIUS
 GROUND_HUB_HEIGHT = 3 * WIRE_RADIUS
 GROUND_HUB_Z = -GROUND_HUB_HEIGHT
 GROUND_HUB_SECTIONS = max(24, WIRE_SECTIONS)
 
-ground_hub_outer = em.geo.Cylinder(
+ground_hub = em.geo.Cylinder(
     GROUND_HUB_OUTER_RADIUS,
     GROUND_HUB_HEIGHT,
     cs=em.GCS.displace(0.0, 0.0, GROUND_HUB_Z),
     Nsections=GROUND_HUB_SECTIONS,
-    name="GroundHubOuter",
+    name="GroundHub",
 )
-ground_hub_inner = em.geo.Cylinder(
-    GROUND_HUB_INNER_RADIUS,
-    GROUND_HUB_HEIGHT,
-    cs=em.GCS.displace(0.0, 0.0, GROUND_HUB_Z),
-    Nsections=GROUND_HUB_SECTIONS,
-    name="GroundHubHole",
-)
-ground_hub = em.geo.subtract(
-    ground_hub_outer,
-    ground_hub_inner,
-).set_material(
-    em.lib.MET_COPPER
-).foreground()
 ground_hub.max_meshsize = 3 * WIRE_RADIUS
 
 
 # ============================================================================
 # FOUR- RADIAL ANGLED GROUND PLANE
 #
-# Each radial starts at the annular hub and slopes downward.  The four
+# Each radial starts inside the solid hub and slopes downward.  The four
 # cylinders are arranged at 90-degree azimuth spacing, making a symmetric
-# ground plane around the vertical radiator while leaving the feed hole clear.
+# ground plane around the vertical radiator.
 # ============================================================================
 
 radials = []
@@ -887,40 +876,145 @@ if RUN_SOLVER:
         freq=F0
     )
 
-    # Y-Z cut
-    ff_yz = field.farfield_2d(
+    # Complete principal-plane cuts. In EMerge the first vector is the
+    # zero-degree reference and the second vector is the plane normal.
+    ff_xz = field.farfield_2d(
         (0, 0, 1),
         (0, 1, 0),
         abc_sel,
-        (-90, 90),
+        (-180, 180),
     )
-
-    # X-Z cut
-    ff_xz = field.farfield_2d(
+    ff_yz = field.farfield_2d(
         (0, 0, 1),
-        (1, 0, 0),
+        (-1, 0, 0),
         abc_sel,
-        (-90, 90),
+        (-180, 180),
+    )
+    ff_xy = field.farfield_2d(
+        (1, 0, 0),
+        (0, 0, 1),
+        abc_sel,
+        (-180, 180),
     )
 
     EISO = em.lib.EISO
 
+    def gain_amplitude(ff):
+        """EMerge isotropic-gain amplitude for a far-field result."""
+        return np.abs(np.asarray(ff.normE) / EISO)
+
+    def plane_metrics(name, ff, orientation):
+        """Print peak gain, azimuthal average, HPBW and front/back ratio."""
+        angles = np.asarray(ff.ang, dtype=float) * 180 / np.pi
+        gain_amp = gain_amplitude(ff)
+        gain_db = 20 * np.log10(np.maximum(gain_amp, 1e-12))
+
+        order = np.argsort(angles)
+        angles = angles[order]
+        gain_db = gain_db[order]
+        gain_amp = gain_amp[order]
+
+        # -180 and +180 describe the same direction. Remove one duplicate so
+        # circular beamwidth and average calculations do not double-count it.
+        if len(angles) > 1 and np.isclose(angles[-1] - angles[0], 360.0):
+            angles = angles[:-1]
+            gain_db = gain_db[:-1]
+            gain_amp = gain_amp[:-1]
+
+        peak_index = int(np.nanargmax(gain_db))
+        peak_angle = float(angles[peak_index])
+        peak_gain_db = float(gain_db[peak_index])
+        average_gain_db = float(
+            10 * np.log10(np.maximum(np.mean(gain_amp**2), 1e-24))
+        )
+
+        opposite_angle = ((peak_angle + 180.0 + 180.0) % 360.0) - 180.0
+        opposite_index = int(np.argmin(np.abs(angles - opposite_angle)))
+        front_to_back_db = peak_gain_db - float(gain_db[opposite_index])
+
+        threshold = peak_gain_db - 3.0
+        above = gain_db >= threshold
+        if np.all(above):
+            beamwidth = 360.0
+        else:
+            left = peak_index
+            right = peak_index
+            while above[(left - 1) % len(above)] and (left - 1) % len(above) != right:
+                left = (left - 1) % len(above)
+            while above[(right + 1) % len(above)] and (right + 1) % len(above) != left:
+                right = (right + 1) % len(above)
+            angular_step = float(np.median(np.abs(np.diff(angles))))
+            beamwidth = ((right - left) % len(above) + 1) * angular_step
+
+        print(
+            f"{name:4s}  peak {peak_gain_db:7.2f} dBi at {peak_angle:7.1f} deg  "
+            f"avg {average_gain_db:7.2f} dBi  "
+            f"HPBW {beamwidth:6.1f} deg  F/B {front_to_back_db:6.2f} dB"
+        )
+        print(f"      angle reference: {orientation}")
+
+    print()
+    print(f"FAR-FIELD GAIN @ {F0/MHz:.1f} MHz")
+    print("--------------------------------------------------------------------------")
+    plane_metrics("X-Z", ff_xz, "0 deg = +Z, +90 deg = +X")
+    plane_metrics("Y-Z", ff_yz, "0 deg = +Z, +90 deg = +Y")
+    plane_metrics("X-Y", ff_xy, "0 deg = +X, +90 deg = +Y")
+
+    # Combined total-gain lobe plot for the three principal planes.
+    plane_peak_db = max(
+        float(np.nanmax(20 * np.log10(np.maximum(gain_amplitude(ff), 1e-12))))
+        for ff in (ff_xz, ff_yz, ff_xy)
+    )
     plot_ff(
-        ff_yz.ang * 180 / np.pi,
+        ff_xz.ang * 180 / np.pi,
         [
-            ff_yz.Elhcp / EISO,
-            ff_yz.Erhcp / EISO,
-            ff_xz.Elhcp / EISO,
-            ff_xz.Erhcp / EISO,
+            ff_xz.normE / EISO,
+            ff_yz.normE / EISO,
+            ff_xy.normE / EISO,
         ],
         dB=True,
         labels=[
-            "LHCP YZ",
-            "RHCP YZ",
-            "LHCP XZ",
-            "RHCP XZ",
+            "Total gain X-Z",
+            "Total gain Y-Z",
+            "Total gain X-Y",
         ],
+        xlabel="Cut angle (degrees)",
+        ylabel="Isotropic gain (dBi)",
+        ylim=(FARFIELD_DB_FLOOR, max(5.0, np.ceil(plane_peak_db + 1))),
+        title=f"Principal-plane gain at {F0/MHz:.1f} MHz",
     )
+
+    # Interactive 3D total-gain lobe with the antenna shown for orientation.
+    if SHOW_3D_FARFIELD:
+        ff_3d = field.farfield_3d(abc_sel)
+        gain_3d_db = 20 * np.log10(
+            np.maximum(gain_amplitude(ff_3d), 1e-12)
+        )
+        peak_3d_index = np.unravel_index(
+            int(np.nanargmax(gain_3d_db)),
+            gain_3d_db.shape,
+        )
+        peak_3d_theta = float(ff_3d.theta[peak_3d_index] * 180 / np.pi)
+        peak_3d_phi = float(ff_3d.phi[peak_3d_index] * 180 / np.pi)
+        print(
+            f"3D peak isotropic gain: {np.nanmax(gain_3d_db):.2f} dBi  "
+            f"theta={peak_3d_theta:.1f} deg, phi={peak_3d_phi:.1f} deg "
+            f"(elevation={90.0 - peak_3d_theta:.1f} deg)"
+        )
+
+        model.display.add_object(antenna, opacity=0.85)
+        model.display.add_object(ground_system, opacity=0.85)
+        model.display.add_farfield3d(
+            ff_3d,
+            component="normE",
+            quantity="abs",
+            dB=True,
+            dBfloor=FARFIELD_DB_FLOOR,
+            rmax=0.45 * antenna_height,
+            offset=(0.0, 0.0, PORT_HEIGHT + antenna_height / 2),
+            opacity=0.7,
+        )
+        model.display.show()
 
 
 print("Done.")

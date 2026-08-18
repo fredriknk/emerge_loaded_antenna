@@ -294,10 +294,12 @@ Both coils can use the same handedness or different handedness.
 ### Centerline Points
 
 ```python
-POINTS_PER_TURN = 32
+POINTS_PER_TURN = 20
 ```
 
-This controls how densely the helix is sampled before creating the EMerge spline.
+This controls how densely the helix is sampled before creating the EMerge
+spline. Two-turn coils need at least 20 samples per turn with the current
+geometry to avoid Gmsh PLC errors.
 
 Higher values provide a more accurate representation but increase geometry complexity.
 
@@ -354,16 +356,17 @@ The antenna centerline starts at:
 z = PORT_HEIGHT
 ```
 
-A short cylindrical copper section is then created from ground level to the antenna:
+A short cylindrical lumped-port region is created from the grounded hub to
+the antenna:
 
 ```python
 PORT_HEIGHT = 2 * mm
 ```
 
-The feed is used for the EMerge lumped port.
-
-The radial ground assembly uses an annular hub with a clearance hole around
-the feed, so the feed is not shorted into the radial copper.
+The feed volume intentionally has no copper material assignment. Its side
+surface carries the EMerge lumped-port boundary condition, while the solid
+radial hub beneath it supplies the ground reference. Assigning copper to the
+feed suppresses the port field and produces a flat 0 dB S11 response.
 
 The default port impedance is:
 
@@ -410,8 +413,11 @@ into touching coil and straight volumes causes Gmsh PLC errors for this thin
 wire in the current EMerge version, so it uses one reliable local mesh size:
 
 ```python
-ANTENNA_MESH_SIZE = 3 * WIRE_RADIUS
+ANTENNA_MESH_SIZE = 2.5 * WIRE_RADIUS
 ```
+
+The 2.5-radius setting is required for the tested two-turn coils; the previous
+3-radius setting remains adequate for the simpler one-turn geometry.
 
 and the model also receives the global setting:
 
@@ -534,24 +540,34 @@ Lower is generally better at the target frequency, but impedance match alone doe
 
 ## Far-Field Calculation
 
-The script also calculates two radiation-pattern cuts at the target frequency.
-
-They represent orthogonal vertical planes:
+The script calculates complete total-gain cuts through all three principal
+planes at the target frequency:
 
 ```text
-YZ plane
-XZ plane
+X-Z elevation plane
+Y-Z elevation plane
+X-Y azimuth plane
 ```
 
-and plot both left- and right-hand circular field components.
+It reports peak isotropic gain, peak direction, plane-average gain, approximate
+3 dB beamwidth and front-to-back ratio for every cut.
+
+When enabled, the interactive 3D total-gain lobe is shown with the antenna for
+orientation:
+
+```python
+SHOW_3D_FARFIELD = True
+FARFIELD_DB_FLOOR = -30
+```
+
+The 3D report includes peak gain plus spherical theta/phi and elevation.
 
 This can be expanded later to investigate:
 
-* total realized gain,
 * antenna efficiency,
 * directivity,
 * polarization,
-* 3D radiation patterns.
+* gain across the full frequency sweep.
 
 ## Changing the Antenna
 
