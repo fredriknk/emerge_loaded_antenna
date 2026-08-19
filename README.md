@@ -224,13 +224,15 @@ The wall-time conversion assumes roughly eight seconds per robust evaluation;
 override it with `--seconds-per-eval` if the live ETA on your machine settles
 substantially higher or lower.
 
-It searches every straight length, every coil pitch and radius, radial length,
-and radial angle. S11 is constrained at the lower edge, center and upper edge
-of the requested matching band. Every run receives the synthesized or supplied
-design as `x0`; each candidate is flushed to CSV and every new global best is
-atomically checkpointed as `campaign_best.json`. Output goes into a new
-frequency-labelled timestamped directory so previous campaigns are never
-overwritten.
+The broad search optimizes every straight length, one pitch and radius shared
+by all coils, radial length, and radial angle. Thus a design with N >= 1 coils
+has only N+5 continuous variables; the zero-coil case has three. After the first
+coil, each added coil introduces only one additional straight length. S11 is
+constrained at the lower edge, center and upper edge of the requested matching
+band. Every run receives the synthesized or supplied design as `x0`; each
+candidate is flushed to CSV and every new global best is atomically
+checkpointed as `campaign_best.json`. Output goes into a new frequency-labelled
+timestamped directory so previous campaigns are never overwritten.
 
 Choose the coil count explicitly. A zero-coil campaign optimizes a conventional
 straight radiator:
@@ -258,6 +260,23 @@ also gets an interruption-safe `turns_*_best.json` checkpoint, and
 `topology_leaderboard.json` ranks their best results under the shared
 objective.
 
+Once the broad campaign has selected a topology and a good geometry, rerun its
+winner with `--finetune`. This releases every coil pitch and radius as an
+independent variable; with N coils the search then has 3N+3 variables:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --hours 12 `
+    --warm-start `
+    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json `
+    --finetune
+```
+
+No topology flag is needed for that second stage: the coil and turn counts are
+inferred from the saved winner. `--finetune` can also be applied directly to a
+multi-topology campaign, but the larger populations make that substantially
+more expensive.
+
 Coil turns are discontinuous geometry choices and are therefore separate
 searches rather than rounded continuous variables. Mixed coil counts and turn
 counts can be selected directly in one list:
@@ -284,8 +303,8 @@ entries. For example, three coils use
 combined with `--turn-cases`; use the mixed list form when explicit turns are
 needed.
 
-For best convergence, first run a full campaign for `1x1`, then give promising
-turn cases their own campaign. `--pattern directional --target-theta ...
+For best optimizer convergence, first use the shared-geometry broad campaign,
+then fine-tune its winner. `--pattern directional --target-theta ...
 --target-phi ...` selects a fixed beam direction; `--pattern peak` restores
 unrestricted maximum-gain optimization. Run `--help` for all objective weights
 and budget controls.
@@ -829,7 +848,20 @@ coils.1.pitch
 straight_lengths.2
 ```
 
-and define an objective such as:
+A variable can intentionally control several fields. This is how the campaign
+shares coil geometry during its broad phase:
+
+```python
+DesignVariable(
+    "coils.0.pitch",
+    4e-3,
+    12e-3,
+    linked_paths=("coils.1.pitch", "coils.2.pitch"),
+    label="shared_coil_pitch",
+)
+```
+
+Those variables can then be passed to an objective such as:
 
 ```text
 minimize |S11| at 868 MHz

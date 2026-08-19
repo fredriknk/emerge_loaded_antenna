@@ -120,7 +120,35 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(three.coil_count, 3)
         self.assertEqual(len(three.straight_lengths), 4)
         self.assertEqual(len(make_space(zero).variables), 3)
-        self.assertEqual(len(make_space(three).variables), 12)
+        self.assertEqual(len(make_space(three).variables), 8)
+        self.assertEqual(len(make_space(three, finetune=True).variables), 12)
+
+    def test_broad_space_shares_coil_pitch_and_radius(self):
+        custom = AntennaDesign(
+            straight_lengths=(0.1, 0.2, 0.1),
+            coils=(
+                CoilDesign(pitch=6e-3, radius=9e-3),
+                CoilDesign(pitch=10e-3, radius=13e-3),
+            ),
+        )
+
+        broad = make_space(custom)
+        vector = broad.initial_vector.copy()
+        vector[broad.names.index("shared_coil_pitch")] = 8.5e-3
+        vector[broad.names.index("shared_coil_radius")] = 12e-3
+        decoded = broad.decode(vector)
+        fine = make_space(custom, finetune=True)
+
+        self.assertEqual(len(broad.variables), 7)
+        self.assertEqual(len(fine.variables), 9)
+        self.assertTrue(
+            all(coil.pitch == 8.5e-3 for coil in decoded.coils)
+        )
+        self.assertTrue(
+            all(coil.radius == 12e-3 for coil in decoded.coils)
+        )
+        self.assertIn("coils.1.pitch", fine.names)
+        self.assertIn("coils.1.radius", fine.names)
 
     def test_custom_start_is_inside_the_generated_search_space(self):
         custom = AntennaDesign(
@@ -171,6 +199,11 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(zero.turn_cases, ((),))
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
         self.assertEqual(three.solver, "cudss")
+        self.assertFalse(three.finetune)
+
+        with patch("sys.argv", ["optimize_gain.py", "--finetune"]):
+            fine = parse_args()
+        self.assertTrue(fine.finetune)
 
     def test_cli_builds_multi_coil_topology_campaign(self):
         with patch(
@@ -239,15 +272,26 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(
             [len(schedule.space.variables) for schedule in schedules],
-            [3, 6, 12],
+            [3, 6, 8],
         )
         self.assertEqual(
             [schedule.population for schedule in schedules],
-            [24, 48, 96],
+            [24, 48, 64],
         )
         self.assertEqual(
             [schedule.evaluations_per_run for schedule in schedules],
             [192, 192, 192],
+        )
+
+        args.finetune = True
+        fine_schedules = build_case_schedules(
+            args,
+            AntennaDesign(),
+            REFERENCE_DESIGN_FREQUENCY_HZ,
+        )
+        self.assertEqual(
+            [len(schedule.space.variables) for schedule in fine_schedules],
+            [3, 6, 12],
         )
 
     def test_campaign_executes_and_ranks_every_requested_coil_count(self):
@@ -312,6 +356,10 @@ class CampaignTests(unittest.TestCase):
                 [3, 1, 0],
             )
             self.assertEqual(best["coil_count"], 3)
+            self.assertEqual(
+                best["simulation"]["coil_parameterization"],
+                "shared",
+            )
 
     def test_strict_and_skipped_convergence_flags_conflict(self):
         with (
@@ -637,8 +685,8 @@ class CampaignTests(unittest.TestCase):
                 (output/"campaign_best.json").read_text(encoding="utf-8")
             )
 
-            self.assertEqual(rows[0]["coils.2.pitch"], "")
-            self.assertNotEqual(rows[1]["coils.2.pitch"], "")
+            self.assertEqual(rows[0]["shared_coil_pitch"], "")
+            self.assertNotEqual(rows[1]["shared_coil_pitch"], "")
             self.assertEqual(rows[0]["coil_count"], "0")
             self.assertEqual(rows[1]["coil_count"], "3")
             self.assertEqual(payload["coil_count"], 3)

@@ -16,17 +16,28 @@ class DesignVariable:
     """One bounded field in an :class:`AntennaDesign`.
 
     Nested fields and tuple indexes use dotted paths, e.g.
-    ``"coils.0.pitch"`` and ``"straight_lengths.1"``.
+    ``"coils.0.pitch"`` and ``"straight_lengths.1"``. ``linked_paths``
+    applies the same optimizer value to additional fields, while ``label``
+    gives that shared variable a meaningful output name.
     """
 
     path: str
     lower: float
     upper: float
     kind: Literal["float", "int"] = "float"
+    linked_paths: tuple[str, ...] = ()
+    label: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "linked_paths", tuple(self.linked_paths))
         if not self.path:
             raise ValueError("variable path cannot be empty")
+        if any(not path for path in self.linked_paths):
+            raise ValueError("linked variable paths cannot be empty")
+        if len(set(self.paths)) != len(self.paths):
+            raise ValueError("linked variable paths must be unique")
+        if self.label is not None and not self.label:
+            raise ValueError("variable label cannot be empty")
         if not np.isfinite(self.lower) or not np.isfinite(self.upper):
             raise ValueError("variable bounds must be finite")
         if self.lower >= self.upper:
@@ -37,6 +48,14 @@ class DesignVariable:
     def coerce(self, value: float) -> float | int:
         value = float(np.clip(value, self.lower, self.upper))
         return int(round(value)) if self.kind == "int" else value
+
+    @property
+    def name(self) -> str:
+        return self.label or self.path
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return (self.path, *self.linked_paths)
 
 
 def _tuple_index(instance: tuple, part: str) -> int:
@@ -100,14 +119,17 @@ class DesignSpace:
         self.base.validate()
         if not self.variables:
             raise ValueError("design space needs at least one variable")
-        if len({variable.path for variable in self.variables}) != len(self.variables):
+        if len({variable.name for variable in self.variables}) != len(self.variables):
+            raise ValueError("design variable names must be unique")
+        paths = [path for variable in self.variables for path in variable.paths]
+        if len(set(paths)) != len(paths):
             raise ValueError("design variable paths must be unique")
         # Exercise every path immediately so typos fail before an expensive run.
         self.decode(self.initial_vector)
 
     @property
     def names(self) -> tuple[str, ...]:
-        return tuple(variable.path for variable in self.variables)
+        return tuple(variable.name for variable in self.variables)
 
     @property
     def bounds(self) -> tuple[tuple[float, float], ...]:
@@ -128,11 +150,13 @@ class DesignSpace:
             )
         design = self.base
         for variable, value in zip(self.variables, vector):
-            design = _replace_nested(
-                design,
-                variable.path.split("."),
-                variable.coerce(float(value)),
-            )
+            coerced = variable.coerce(float(value))
+            for path in variable.paths:
+                design = _replace_nested(
+                    design,
+                    path.split("."),
+                    coerced,
+                )
         design.validate()
         return design
 

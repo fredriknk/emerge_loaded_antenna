@@ -173,17 +173,39 @@ def design_for_turn_case(
 def make_space(
     base: AntennaDesign,
     frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
+    finetune: bool = False,
 ) -> DesignSpace:
-    """Create wavelength-scaled bounds; turns stay fixed per discrete case."""
+    """Create wavelength-scaled bounds for broad or fine topology searches."""
     if not np.isfinite(frequency_hz) or frequency_hz <= 0:
         raise ValueError("frequency_hz must be finite and positive")
     scale = REFERENCE_DESIGN_FREQUENCY_HZ/frequency_hz
+
     def enclose(
         bounds: tuple[float, float],
         value: float,
     ) -> tuple[float, float]:
         lower, upper = bounds
         return min(lower, 0.8*value), max(upper, 1.2*value)
+
+    original_pitches = tuple(coil.pitch for coil in base.coils)
+    original_radii = tuple(coil.radius for coil in base.coils)
+    if base.coils and not finetune:
+        shared_pitch = float(np.mean(original_pitches))
+        minimum_radius = max(
+            0.5001*coil.transition_offset for coil in base.coils
+        )
+        shared_radius = max(float(np.mean(original_radii)), minimum_radius)
+        base = replace(
+            base,
+            coils=tuple(
+                replace(
+                    coil,
+                    pitch=shared_pitch,
+                    radius=shared_radius,
+                )
+                for coil in base.coils
+            ),
+        )
 
     if base.coil_count == 2:
         default_straight_bounds = (
@@ -209,27 +231,64 @@ def make_space(
         DesignVariable(f"straight_lengths.{index}", lower, upper)
         for index, (lower, upper) in enumerate(straight_bounds)
     ]
-    for index, coil in enumerate(base.coils):
-        pitch_bounds = enclose(
-            (4e-3*scale, 12e-3*scale),
-            coil.pitch,
-        )
+    if base.coils and not finetune:
+        pitch_bounds = (4e-3*scale, 12e-3*scale)
+        for pitch in original_pitches:
+            pitch_bounds = enclose(pitch_bounds, pitch)
         variables.append(
-            DesignVariable(f"coils.{index}.pitch", *pitch_bounds)
+            DesignVariable(
+                "coils.0.pitch",
+                *pitch_bounds,
+                linked_paths=tuple(
+                    f"coils.{index}.pitch"
+                    for index in range(1, base.coil_count)
+                ),
+                label="shared_coil_pitch",
+            )
         )
-    for index, coil in enumerate(base.coils):
-        radius_bounds = enclose(
-            (7e-3*scale, 16e-3*scale),
-            coil.radius,
+        radius_bounds = (7e-3*scale, 16e-3*scale)
+        for radius in original_radii:
+            radius_bounds = enclose(radius_bounds, radius)
+        minimum_radius = max(
+            0.5001*coil.transition_offset for coil in base.coils
         )
-        minimum_radius = 0.5001*coil.transition_offset
         radius_bounds = (
             max(minimum_radius, radius_bounds[0]),
             radius_bounds[1],
         )
         variables.append(
-            DesignVariable(f"coils.{index}.radius", *radius_bounds)
+            DesignVariable(
+                "coils.0.radius",
+                *radius_bounds,
+                linked_paths=tuple(
+                    f"coils.{index}.radius"
+                    for index in range(1, base.coil_count)
+                ),
+                label="shared_coil_radius",
+            )
         )
+    else:
+        for index, coil in enumerate(base.coils):
+            pitch_bounds = enclose(
+                (4e-3*scale, 12e-3*scale),
+                coil.pitch,
+            )
+            variables.append(
+                DesignVariable(f"coils.{index}.pitch", *pitch_bounds)
+            )
+        for index, coil in enumerate(base.coils):
+            radius_bounds = enclose(
+                (7e-3*scale, 16e-3*scale),
+                coil.radius,
+            )
+            minimum_radius = 0.5001*coil.transition_offset
+            radius_bounds = (
+                max(minimum_radius, radius_bounds[0]),
+                radius_bounds[1],
+            )
+            variables.append(
+                DesignVariable(f"coils.{index}.radius", *radius_bounds)
+            )
     radial_bounds = enclose(
         (55e-3*scale, 120e-3*scale),
         base.radial_length,
@@ -504,6 +563,15 @@ def parse_args() -> argparse.Namespace:
             "none for zero coils, 1 for one coil, or forms such as 1x2x1"
         ),
     )
+    parser.add_argument(
+        "--finetune",
+        "--fine-tune",
+        action="store_true",
+        help=(
+            "optimize every coil pitch and radius independently; broad "
+            "searches share one pitch and radius across all coils"
+        ),
+    )
     parser.add_argument("--report-every", type=int, default=10)
     parser.add_argument(
         "--warm-start",
@@ -724,7 +792,11 @@ def build_case_schedules(
     schedules = []
     for turn_case in args.turn_cases:
         design = design_for_turn_case(initial, turn_case, frequency_hz)
-        space = make_space(design, frequency_hz)
+        space = make_space(
+            design,
+            frequency_hz,
+            finetune=getattr(args, "finetune", False),
+        )
         variable_count = len(space.variables)
         maxiter = iterations_per_run(args, variable_count, run_count)
         population = max(5, args.popsize*variable_count)
@@ -872,6 +944,7 @@ def ensure_convergence_certificate(
 
 def run_campaign(args: argparse.Namespace) -> None:
     frequency_hz = args.frequency_hz
+    args.finetune = bool(getattr(args, "finetune", False))
     initial = load_baseline(args.warm_start, frequency_hz)
     resolve_topology(args, initial)
     schedules = build_case_schedules(args, initial, frequency_hz)
@@ -905,6 +978,9 @@ def run_campaign(args: argparse.Namespace) -> None:
         "farfield_angular_step_deg": args.angular_step,
         "coil_counts": list(args.coil_counts),
         "turn_cases": [list(turn_case) for turn_case in args.turn_cases],
+        "coil_parameterization": (
+            "independent" if args.finetune else "shared"
+        ),
         "convergence_status": (
             "skipped"
             if args.skip_convergence_check
@@ -956,6 +1032,14 @@ def run_campaign(args: argparse.Namespace) -> None:
     print(
         "Coil counts     : "
         + ", ".join(str(count) for count in args.coil_counts)
+    )
+    print(
+        "Coil geometry   : "
+        + (
+            "independent pitch/radius (--finetune)"
+            if args.finetune
+            else "shared pitch/radius (broad search)"
+        )
     )
     print(f"Linear solver   : {args.solver}")
     print(

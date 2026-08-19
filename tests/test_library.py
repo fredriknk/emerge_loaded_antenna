@@ -90,6 +90,46 @@ class DesignTests(unittest.TestCase):
         self.assertEqual(space.names[1], "coils.0.pitch")
         self.assertEqual(space.bounds[2], (1, 4))
 
+    def test_linked_design_variable_updates_multiple_fields(self):
+        base = AntennaDesign(
+            straight_lengths=(0.1, 0.1, 0.1, 0.1),
+            coils=(CoilDesign(), CoilDesign(), CoilDesign()),
+        )
+        space = DesignSpace(
+            base,
+            (
+                DesignVariable(
+                    "coils.0.pitch",
+                    4e-3,
+                    12e-3,
+                    linked_paths=("coils.1.pitch", "coils.2.pitch"),
+                    label="shared_coil_pitch",
+                ),
+            ),
+        )
+
+        design = space.decode((9e-3,))
+
+        self.assertEqual(space.names, ("shared_coil_pitch",))
+        self.assertTrue(
+            all(np.isclose(coil.pitch, 9e-3) for coil in design.coils)
+        )
+
+    def test_linked_design_variable_paths_cannot_overlap(self):
+        with self.assertRaisesRegex(ValueError, "paths must be unique"):
+            DesignSpace(
+                AntennaDesign(),
+                (
+                    DesignVariable(
+                        "coils.0.pitch",
+                        4e-3,
+                        12e-3,
+                        linked_paths=("coils.1.pitch",),
+                    ),
+                    DesignVariable("coils.1.pitch", 4e-3, 12e-3),
+                ),
+            )
+
     def test_normalized_vector_round_trip(self):
         space = DesignSpace(
             AntennaDesign(),
