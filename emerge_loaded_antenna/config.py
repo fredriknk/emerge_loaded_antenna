@@ -10,6 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 
+SOLVER_CHOICES = (
+    "auto",
+    "superlu",
+    "umfpack",
+    "pardiso",
+    "cudss",
+    "mumps",
+    "aasds",
+    "cholmod",
+)
+
 
 @dataclass(frozen=True)
 class CoilDesign:
@@ -163,6 +174,7 @@ class SimulationOptions:
     sweep: FrequencySweep = field(default_factory=FrequencySweep)
     mesh: MeshSettings = field(default_factory=MeshSettings)
     solve: bool = True
+    solver: str = "auto"
     compute_farfield: bool = False
     farfield_frequency: float | None = None
     farfield_angular_step_deg: float = 2.0
@@ -175,6 +187,9 @@ class SimulationOptions:
     def validate(self) -> None:
         self.sweep.validate()
         self.mesh.validate()
+        if self.solver not in SOLVER_CHOICES:
+            choices = ", ".join(SOLVER_CHOICES)
+            raise ValueError(f"solver must be one of: {choices}")
         if self.compute_farfield and not self.solve:
             raise ValueError("compute_farfield requires solve=True")
         if self.farfield_frequency is not None and self.farfield_frequency <= 0:

@@ -6,6 +6,9 @@ plotting and interactive viewers outside the reusable simulation API.
 
 from __future__ import annotations
 
+import argparse
+from dataclasses import replace
+
 import numpy as np
 
 import emerge as em
@@ -16,6 +19,7 @@ from emerge_loaded_antenna import (
     CoilDesign,
     FrequencySweep,
     MeshSettings,
+    SOLVER_CHOICES,
     SimulationOptions,
     simulate,
 )
@@ -24,25 +28,30 @@ mm = 1e-3
 MHz = 1e6
 
 
+# Winner from optimization_results/robust_20260818_211230/campaign_best.json.
 DESIGN = AntennaDesign(
     wire_radius=1.0*mm,
-    radial_length=72*mm,
-    radial_angle_deg=45.0,
+    radial_length=0.11351407822319767,
+    radial_angle_deg=29.282203531097146,
     radial_count=4,
-    straight_lengths=(140*mm, 221*mm, 140*mm),
+    straight_lengths=(
+        0.08484335404758198,
+        0.13553510350164583,
+        0.10071453385203444,
+    ),
     coils=(
         CoilDesign(
-            radius=10*mm,
+            radius=0.01187641496751313,
             turns=1,
-            pitch=7*mm,
+            pitch=0.005829661698094601,
             transition=6*mm,
             transition_offset=4.75*mm,
             handedness="RH",
         ),
         CoilDesign(
-            radius=10*mm,
+            radius=0.007377593599307462,
             turns=1,
-            pitch=7*mm,
+            pitch=0.009140078375031589,
             transition=6*mm,
             transition_offset=4.75*mm,
             handedness="RH",
@@ -54,22 +63,22 @@ DESIGN = AntennaDesign(
 
 F0 = 868*MHz
 RUN_SOLVER = True
-SHOW_GEOMETRY = False
+SHOW_GEOMETRY = True
 SHOW_COIL_PREVIEW = False
 SHOW_MESH = True
 SHOW_3D_FARFIELD = True
 FARFIELD_DB_FLOOR = -30.0
 
 OPTIONS = SimulationOptions(
-    sweep=FrequencySweep(center=F0, span=100*MHz, points=5),
+    sweep=FrequencySweep(center=F0, span=50*MHz, points=11),
     mesh=MeshSettings(
         wire_sections=6,
         antenna_size_factor=3.0,
         radial_size_factor=10.0,
         feed_size_factor=3.0,
-        curved_boundary_segments=12,
-        wavelength_resolution=0.5,
-        air_margin_wavelengths=0.25,
+        curved_boundary_segments=20,
+        wavelength_resolution=0.33,
+        air_margin_wavelengths=1.0,
         preview_points_per_turn=20,
     ),
     solve=RUN_SOLVER,
@@ -226,8 +235,20 @@ def report_farfield(result) -> None:
         model.display.show()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--solver",
+        choices=SOLVER_CHOICES,
+        default=OPTIONS.solver,
+        help="linear solver backend (default: %(default)s)",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    result = simulate(DESIGN, OPTIONS)
+    args = parse_args()
+    result = simulate(DESIGN, replace(OPTIONS, solver=args.solver))
     if not result.solved:
         print("Done (mesh only).")
         return

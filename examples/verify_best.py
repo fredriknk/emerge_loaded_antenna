@@ -17,6 +17,7 @@ import numpy as np
 from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
+    SOLVER_CHOICES,
     SimulationOptions,
     SimulationResult,
     load_design,
@@ -155,11 +156,17 @@ def show_3d(result: SimulationResult) -> None:
     model.display.show()
 
 
-def options(mesh: MeshSettings, angular_step: float, points: int) -> SimulationOptions:
+def options(
+    mesh: MeshSettings,
+    angular_step: float,
+    points: int,
+    solver: str,
+) -> SimulationOptions:
     return SimulationOptions(
         sweep=FrequencySweep(center=FREQUENCY, span=30e6, points=points),
         mesh=mesh,
         solve=True,
+        solver=solver,
         compute_farfield=True,
         farfield_frequency=FREQUENCY,
         farfield_angular_step_deg=angular_step,
@@ -178,6 +185,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--angular-step", type=float, default=0.5)
     parser.add_argument("--frequency-points", type=int, default=13)
+    parser.add_argument(
+        "--solver",
+        choices=SOLVER_CHOICES,
+        default="auto",
+        help="linear solver backend (default: %(default)s)",
+    )
     parser.add_argument("--skip-coarse", action="store_true")
     parser.add_argument("--show-3d", action="store_true")
     args = parser.parse_args()
@@ -198,7 +211,7 @@ def main() -> None:
     if not args.skip_coarse:
         coarse_result = simulate(
             design,
-            options(MeshSettings(), 2.0, args.frequency_points),
+            options(MeshSettings(), 2.0, args.frequency_points, args.solver),
         )
         payload["coarse"] = result_summary(coarse_result)
         print_summary("coarse", payload["coarse"])
@@ -215,7 +228,7 @@ def main() -> None:
     )
     fine_result = simulate(
         design,
-        options(fine_mesh, args.angular_step, args.frequency_points),
+        options(fine_mesh, args.angular_step, args.frequency_points, args.solver),
     )
     payload["fine"] = result_summary(fine_result)
     print_summary("fine", payload["fine"])

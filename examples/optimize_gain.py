@@ -24,6 +24,7 @@ from emerge_loaded_antenna import (
     EvaluationRecord,
     FrequencySweep,
     RobustGainObjective,
+    SOLVER_CHOICES,
     SimulationOptions,
     load_design,
 )
@@ -392,6 +393,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ripple-weight", type=float, default=0.15)
     parser.add_argument("--height-weight", type=float, default=0.10)
     parser.add_argument("--angular-step", type=float, default=2.0)
+    parser.add_argument(
+        "--solver",
+        choices=SOLVER_CHOICES,
+        default="auto",
+        help="linear solver backend (default: %(default)s)",
+    )
     parser.add_argument("--polish", action="store_true")
     args = parser.parse_args()
     if args.maxiter is None and args.hours is None:
@@ -481,6 +488,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         "before penalty"
     )
     print(f"Loading coils   : {args.coil_count}")
+    print(f"Linear solver   : {args.solver}")
     print(f"Variables       : {variable_count} continuous")
     print(
         "Turn cases      : "
@@ -505,6 +513,7 @@ def run_campaign(args: argparse.Namespace) -> None:
                 options = SimulationOptions(
                     sweep=FrequencySweep(center=FREQUENCY, span=10e6, points=3),
                     solve=True,
+                    solver=args.solver,
                     compute_farfield=True,
                     farfield_frequency=FREQUENCY,
                     farfield_angular_step_deg=args.angular_step,

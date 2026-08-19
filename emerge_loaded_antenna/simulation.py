@@ -196,6 +196,23 @@ def _print_design(design: AntennaDesign, path: AntennaPath) -> None:
     print("----------------------------------------------------")
 
 
+def _configure_solver(model: em.Simulation, solver_name: str) -> None:
+    if solver_name == "auto":
+        return
+    solver = getattr(em.EMSolver, solver_name.upper())
+    try:
+        model.set_solver(solver)
+    except KeyError as error:
+        install_hint = (
+            " Run 'emerge install-solver cudss' in the active environment."
+            if solver_name == "cudss"
+            else ""
+        )
+        raise RuntimeError(
+            f"EMerge solver {solver_name!r} is unavailable.{install_hint}"
+        ) from error
+
+
 def build_model(
     design: AntennaDesign | None = None,
     options: SimulationOptions | None = None,
@@ -216,6 +233,8 @@ def build_model(
         loglevel="INFO" if options.verbose else "ERROR",
     )
     model.check_version("2.8.4")
+    if options.solve:
+        _configure_solver(model, options.solver)
 
     antenna_curve = CompositeCurve(path.segments, name="AntennaCenterline")
     wire_section = em.geo.XYPolygon.circle(

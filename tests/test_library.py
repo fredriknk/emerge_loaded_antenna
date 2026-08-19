@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -16,10 +16,12 @@ from emerge_loaded_antenna import (
     FrequencySweep,
     GainMatchObjective,
     RobustGainObjective,
+    SOLVER_CHOICES,
     SimulationOptions,
     build_centerline,
     design_from_dict,
 )
+from emerge_loaded_antenna.simulation import _configure_solver
 
 
 class DesignTests(unittest.TestCase):
@@ -105,6 +107,21 @@ class DesignTests(unittest.TestCase):
         options = SimulationOptions(farfield_angular_step_deg=0.0)
         with self.assertRaisesRegex(ValueError, "angular_step"):
             options.validate()
+
+    def test_solver_selection_is_validated(self):
+        self.assertIn("cudss", SOLVER_CHOICES)
+        SimulationOptions(solver="cudss").validate()
+        with self.assertRaisesRegex(ValueError, "solver must be one of"):
+            SimulationOptions(solver="cuda").validate()
+
+    def test_solver_selection_maps_to_emerge_and_reports_missing_backend(self):
+        model = SimpleNamespace(set_solver=Mock())
+        _configure_solver(model, "cudss")
+        self.assertEqual(model.set_solver.call_args.args[0].name, "CUDSS")
+
+        model.set_solver.side_effect = KeyError("cudss")
+        with self.assertRaisesRegex(RuntimeError, "install-solver cudss"):
+            _configure_solver(model, "cudss")
 
     def test_design_json_mapping_round_trip(self):
         original = replace(

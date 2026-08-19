@@ -13,6 +13,7 @@ from .config import (
     CoilDesign,
     FrequencySweep,
     MeshSettings,
+    SOLVER_CHOICES,
     SimulationOptions,
 )
 from .geometry import AntennaPath, CompositeCurve, build_centerline
@@ -49,6 +50,7 @@ __all__ = [
     "MeshSettings",
     "ModelArtifacts",
     "RobustGainObjective",
+    "SOLVER_CHOICES",
     "S11Objective",
     "SimulationOptions",
     "SimulationResult",

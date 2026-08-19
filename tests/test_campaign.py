@@ -61,12 +61,15 @@ class CampaignTests(unittest.TestCase):
                 "3",
                 "--turn-cases",
                 "1x2x1,2x2x1",
+                "--solver",
+                "cudss",
             ],
         ):
             three = parse_args()
 
         self.assertEqual(zero.turn_cases, ((),))
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
+        self.assertEqual(three.solver, "cudss")
 
     def test_progress_checkpoints_each_new_best(self):
         space = make_space(AntennaDesign())

@@ -600,6 +600,32 @@ Once the geometry looks correct:
 RUN_SOLVER = True
 ```
 
+## Choosing a Linear Solver
+
+EMerge selects a linear solver automatically by default. Override it from the
+interactive example with:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py --solver pardiso
+```
+
+Available names are `auto`, `superlu`, `umfpack`, `pardiso`, `cudss`, `mumps`,
+`aasds`, and `cholmod`. Optional backends must be installed before use. On
+Windows with an NVIDIA GPU, install EMerge's CUDA 12 CuDSS dependencies with:
+
+```powershell
+.\.venv\Scripts\emerge.exe install-solver cudss
+```
+
+Then run:
+
+```powershell
+.\.venv\Scripts\python.exe .\main.py --solver cudss
+```
+
+The optimization and verification scripts accept the same `--solver` flag.
+An unavailable backend fails before meshing starts.
+
 ## S11 Results
 
 After solving, the script displays S11 using:
