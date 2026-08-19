@@ -23,10 +23,14 @@ from emerge_loaded_antenna import (
     DesignVariable,
     EvaluationRecord,
     FrequencySweep,
+    MeshSettings,
+    OpenRegionSettings,
     RobustGainObjective,
     SOLVER_CHOICES,
     SimulationOptions,
     load_design,
+    selected_open_region_configuration,
+    validate_convergence_certificate,
 )
 
 FREQUENCY = 868e6
@@ -184,9 +188,10 @@ def result_payload(
     turn_case: tuple[int, ...],
     seed: int,
     evaluations: int,
+    simulation_metadata: dict | None = None,
 ) -> dict:
     design = space.decode(record.vector)
-    return {
+    payload = {
         "frequency_hz": FREQUENCY,
         "objective": record.score,
         "s11_db": record.s11_db,
@@ -199,6 +204,9 @@ def result_payload(
         "variables": dict(zip(space.names, record.vector)),
         "design": asdict(design),
     }
+    if simulation_metadata is not None:
+        payload["simulation"] = simulation_metadata
+    return payload
 
 
 class CampaignProgress:
@@ -210,6 +218,7 @@ class CampaignProgress:
         total: int,
         report_every: int,
         variable_names: tuple[str, ...],
+        simulation_metadata: dict | None = None,
     ):
         self.output = output
         self.total = total
@@ -222,6 +231,7 @@ class CampaignProgress:
         self.best_turn_case: tuple[int, ...] = ()
         self.best_seed = 0
         self.last_reported_best: EvaluationRecord | None = None
+        self.simulation_metadata = simulation_metadata
         self.space: DesignSpace | None = None
         self.turn_case: tuple[int, ...] = ()
         self.seed = 0
@@ -236,7 +246,6 @@ class CampaignProgress:
             "seed",
             "score",
             "s11_db",
-            "peak_gain_dbi",
             "error",
             *METRIC_FIELDS,
             *variable_names,
@@ -276,6 +285,7 @@ class CampaignProgress:
                 self.turn_case,
                 self.seed,
                 self.count,
+                self.simulation_metadata,
             )
             write_json(self.output/"campaign_best.json", payload)
 
@@ -393,6 +403,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ripple-weight", type=float, default=0.15)
     parser.add_argument("--height-weight", type=float, default=0.10)
     parser.add_argument("--angular-step", type=float, default=2.0)
+    parser.add_argument("--air-margin-wavelengths", type=float, default=0.25)
+    parser.add_argument("--abc-buffer-wavelengths", type=float, default=1.00)
+    parser.add_argument("--wavelength-resolution", type=float, default=0.33)
+    parser.add_argument(
+        "--convergence-report",
+        type=Path,
+        default=Path("optimization_results/open_region_convergence.json"),
+        help="passing report from examples/check_open_region.py",
+    )
+    parser.add_argument(
+        "--skip-convergence-check",
+        action="store_true",
+        help="run without a matching open-region certificate (not recommended)",
+    )
     parser.add_argument(
         "--solver",
         choices=SOLVER_CHOICES,
@@ -409,6 +433,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--hours must be positive")
     if args.popsize < 1 or args.seconds_per_eval <= 0:
         parser.error("--popsize and --seconds-per-eval must be positive")
+    numerical_values = (
+        args.air_margin_wavelengths,
+        args.abc_buffer_wavelengths,
+        args.wavelength_resolution,
+    )
+    if any(not np.isfinite(value) or value <= 0 for value in numerical_values):
+        parser.error("open-region and mesh values must be finite and positive")
     if args.coil_count is not None and args.coil_count < 0:
         parser.error("--coil-count must be non-negative")
     if args.turn_cases is None:
@@ -461,6 +492,41 @@ def iterations_per_run(
 
 def run_campaign(args: argparse.Namespace) -> None:
     baseline = design_for_coil_count(load_baseline(args.warm_start), args.coil_count)
+    mesh = replace(
+        MeshSettings(),
+        air_margin_wavelengths=args.air_margin_wavelengths,
+        wavelength_resolution=args.wavelength_resolution,
+    )
+    open_region = replace(
+        OpenRegionSettings(),
+        mode="abc",
+        abc_buffer_wavelengths=args.abc_buffer_wavelengths,
+    )
+    certificate = None
+    if not args.skip_convergence_check:
+        try:
+            certificate = validate_convergence_certificate(
+                args.convergence_report,
+                baseline,
+                mesh,
+                open_region,
+                FREQUENCY,
+            )
+        except RuntimeError as error:
+            raise SystemExit(
+                f"OPEN-REGION PREFLIGHT FAILED\n{error}\n\n"
+                "Run examples/check_open_region.py for this warm start and "
+                "configuration, or use --skip-convergence-check explicitly."
+            ) from error
+    simulation_metadata = {
+        "mesh": asdict(mesh),
+        "open_region": asdict(open_region),
+        "solver": args.solver,
+        "farfield_angular_step_deg": args.angular_step,
+        "convergence_report": (
+            str(args.convergence_report.resolve()) if certificate else None
+        ),
+    }
     run_count = len(args.seeds)*len(args.turn_cases)
     baseline_space = make_space(baseline)
     variable_count = len(baseline_space.variables)
@@ -473,6 +539,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         total,
         args.report_every,
         baseline_space.names,
+        simulation_metadata,
     )
     run_summaries = []
 
@@ -489,6 +556,16 @@ def run_campaign(args: argparse.Namespace) -> None:
     )
     print(f"Loading coils   : {args.coil_count}")
     print(f"Linear solver   : {args.solver}")
+    print(
+        f"Open region     : inner Huygens box at "
+        f"{mesh.air_margin_wavelengths:.2f} lambda + "
+        f"{open_region.abc_buffer_wavelengths:.2f} lambda all-face ABC buffer"
+    )
+    print(f"Air resolution  : {mesh.wavelength_resolution:.2f} wavelengths")
+    if certificate is None:
+        print("Preflight       : SKIPPED BY USER")
+    else:
+        print(f"Preflight       : PASS ({args.convergence_report.resolve()})")
     print(f"Variables       : {variable_count} continuous")
     print(
         "Turn cases      : "
@@ -512,6 +589,8 @@ def run_campaign(args: argparse.Namespace) -> None:
                 progress.set_context(space, turn_case, seed)
                 options = SimulationOptions(
                     sweep=FrequencySweep(center=FREQUENCY, span=10e6, points=3),
+                    mesh=mesh,
+                    open_region=open_region,
                     solve=True,
                     solver=args.solver,
                     compute_farfield=True,
@@ -561,6 +640,7 @@ def run_campaign(args: argparse.Namespace) -> None:
                     turn_case,
                     seed,
                     progress.count,
+                    simulation_metadata,
                 )
                 summary.update(
                     optimizer_success=bool(result.success),

@@ -21,6 +21,9 @@ SOLVER_CHOICES = (
     "cholmod",
 )
 
+OPEN_REGION_MODES = ("pml", "abc")
+ABC_TYPES = ("A", "B", "C", "D", "E")
+
 
 @dataclass(frozen=True)
 class CoilDesign:
@@ -147,7 +150,7 @@ class MeshSettings:
     radial_size_factor: float = 10.0
     feed_size_factor: float = 3.0
     curved_boundary_segments: int = 12
-    wavelength_resolution: float = 0.5
+    wavelength_resolution: float = 0.33
     air_margin_wavelengths: float = 0.25
     preview_points_per_turn: int = 20
 
@@ -168,11 +171,56 @@ class MeshSettings:
 
 
 @dataclass(frozen=True)
+class OpenRegionSettings:
+    """Termination used around the finite free-space simulation domain.
+
+    ``pml`` surrounds the inner air/Huygens box on all six sides with a
+    perfectly matched layer. ``abc`` adds an ordinary-air buffer outside the
+    Huygens box and applies a second-order absorbing boundary to every outer
+    face. The bottom face is deliberately never omitted.
+    """
+
+    mode: str = "abc"
+    abc_buffer_wavelengths: float = 1.00
+    pml_thickness_wavelengths: float = 0.25
+    pml_mesh_layers: int = 5
+    pml_exponent: float = 1.5
+    pml_delta_max: float = 8.0
+    abc_order: int = 2
+    abc_type: str = "B"
+
+    def validate(self) -> None:
+        if self.mode not in OPEN_REGION_MODES:
+            choices = ", ".join(OPEN_REGION_MODES)
+            raise ValueError(f"open-region mode must be one of: {choices}")
+        if (
+            isinstance(self.pml_mesh_layers, bool)
+            or int(self.pml_mesh_layers) != self.pml_mesh_layers
+            or self.pml_mesh_layers < 2
+        ):
+            raise ValueError("pml_mesh_layers must be an integer of at least two")
+        for name, value in (
+            ("abc_buffer_wavelengths", self.abc_buffer_wavelengths),
+            ("pml_thickness_wavelengths", self.pml_thickness_wavelengths),
+            ("pml_exponent", self.pml_exponent),
+            ("pml_delta_max", self.pml_delta_max),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if self.abc_order not in {1, 2}:
+            raise ValueError("abc_order must be one or two")
+        if self.abc_type not in ABC_TYPES:
+            choices = ", ".join(ABC_TYPES)
+            raise ValueError(f"abc_type must be one of: {choices}")
+
+
+@dataclass(frozen=True)
 class SimulationOptions:
     """Runtime behavior for one model evaluation."""
 
     sweep: FrequencySweep = field(default_factory=FrequencySweep)
     mesh: MeshSettings = field(default_factory=MeshSettings)
+    open_region: OpenRegionSettings = field(default_factory=OpenRegionSettings)
     solve: bool = True
     solver: str = "auto"
     compute_farfield: bool = False
@@ -187,6 +235,7 @@ class SimulationOptions:
     def validate(self) -> None:
         self.sweep.validate()
         self.mesh.validate()
+        self.open_region.validate()
         if self.solver not in SOLVER_CHOICES:
             choices = ", ".join(SOLVER_CHOICES)
             raise ValueError(f"solver must be one of: {choices}")

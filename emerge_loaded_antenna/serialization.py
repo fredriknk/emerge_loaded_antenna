@@ -22,6 +22,28 @@ def _coil_from_value(value: Any) -> CoilDesign:
 def design_from_dict(values: Mapping[str, Any]) -> AntennaDesign:
     """Construct and validate a design from an ``asdict``-style mapping."""
     data = dict(values)
+    legacy_fields = {
+        "bottom_length",
+        "middle_length",
+        "top_length",
+        "coil1",
+        "coil2",
+    }
+    if "straight_lengths" not in data and legacy_fields & data.keys():
+        missing = legacy_fields - data.keys()
+        if missing:
+            raise ValueError(
+                "legacy two-coil design is missing: " + ", ".join(sorted(missing))
+            )
+        data["straight_lengths"] = (
+            data.pop("bottom_length"),
+            data.pop("middle_length"),
+            data.pop("top_length"),
+        )
+        data["coils"] = (
+            _coil_from_value(data.pop("coil1")),
+            _coil_from_value(data.pop("coil2")),
+        )
     if "straight_lengths" in data:
         lengths = data["straight_lengths"]
         if isinstance(lengths, (str, bytes)) or not isinstance(lengths, Sequence):

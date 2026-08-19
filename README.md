@@ -152,13 +152,31 @@ convert geometry/solver failures into a finite penalty.
 
 ### Twelve-hour robust campaign
 
-The recommended campaign warm-starts from
-`optimization_results/best_result.json`, runs four independent differential-
-evolution populations, and divides the requested time budget between them:
+First certify the numerical domain around the same representative design that
+will be used as the optimizer warm start:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
+    .\optimization_results\best_result.json
+```
+
+This runs seven isolated real solves. It varies the inner Huygens clearance,
+the distance to the all-face absorbing boundary, and the air-mesh resolution.
+A passing report is written to
+`optimization_results/open_region_convergence.json`.
+
+The recommended campaign then warm-starts from that same result, verifies the
+certificate, runs four independent differential-evolution populations, and
+divides the requested time budget between them:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
 ```
+
+If a different warm start is supplied, pass it to both commands. The optimizer
+rejects a report generated for another design, frequency, boundary distance,
+or mesh resolution. `--skip-convergence-check` is available as an explicit
+escape hatch for experiments, but such gain values are not certified.
 
 The wall-time conversion assumes roughly eight seconds per robust evaluation;
 override it with `--seconds-per-eval` if the live ETA on your machine settles
@@ -472,11 +490,11 @@ surface carries the EMerge lumped-port boundary condition, while the solid
 radial hub beneath it supplies the ground reference. Assigning copper to the
 feed suppresses the port field and produces a flat 0 dB S11 response.
 
-## Air Region
+## Open Air Region and Far-Field Surface
 
-The antenna is placed inside an air box.
-
-The margin around the antenna defaults to a quarter wavelength:
+The antenna is enclosed by a closed inner air box. Its six faces form the
+Huygens integration surface used for every 2D and 3D far-field calculation.
+The clearance defaults to a quarter wavelength:
 
 ```python
 mesh = MeshSettings(air_margin_wavelengths=0.25)
@@ -500,7 +518,40 @@ so a quarter wavelength is approximately:
 86 mm
 ```
 
-The absorbing boundary condition is applied to the outside surfaces of this region.
+This is not the termination boundary. A separate ordinary-air shell extends a
+further wavelength by default, and a second-order absorbing boundary condition
+is applied to every exterior face:
+
+```python
+from emerge_loaded_antenna import OpenRegionSettings, SimulationOptions
+
+options = SimulationOptions(
+    open_region=OpenRegionSettings(
+        mode="abc",
+        abc_buffer_wavelengths=1.0,
+    ),
+)
+```
+
+The bottom is included. It is never left unassigned for EMerge to turn into a
+PEC wall. Keeping the inner Huygens surface separate from the outer termination
+also prevents boundary placement from changing the integration surface.
+
+An all-sided PML is available for high-memory reference runs:
+
+```python
+options = SimulationOptions(
+    open_region=OpenRegionSettings(
+        mode="pml",
+        pml_thickness_wavelengths=0.25,
+        pml_mesh_layers=5,
+    ),
+)
+```
+
+The PML creates 26 edge/face/corner blocks around the inner box and is far more
+expensive than the buffered ABC. It is intended for final cross-checks rather
+than thousands of optimizer evaluations.
 
 ## Meshing
 
@@ -516,7 +567,7 @@ The equivalent global and curved-boundary settings are also configurable:
 
 ```python
 mesh = MeshSettings(
-    wavelength_resolution=0.5,
+    wavelength_resolution=0.33,
     curved_boundary_segments=12,
 )
 ```

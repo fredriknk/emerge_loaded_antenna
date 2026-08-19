@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -15,11 +18,17 @@ from emerge_loaded_antenna import (
     EvaluationRecord,
     FrequencySweep,
     GainMatchObjective,
+    MeshSettings,
+    OpenRegionSettings,
     RobustGainObjective,
     SOLVER_CHOICES,
     SimulationOptions,
     build_centerline,
+    build_model,
+    design_fingerprint,
     design_from_dict,
+    selected_open_region_configuration,
+    validate_convergence_certificate,
 )
 from emerge_loaded_antenna.simulation import _configure_solver
 
@@ -114,6 +123,46 @@ class DesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "solver must be one of"):
             SimulationOptions(solver="cuda").validate()
 
+    def test_open_region_settings_are_validated(self):
+        OpenRegionSettings(mode="abc").validate()
+        OpenRegionSettings(mode="pml").validate()
+        with self.assertRaisesRegex(ValueError, "open-region mode"):
+            OpenRegionSettings(mode="reflector").validate()
+        with self.assertRaisesRegex(ValueError, "pml_mesh_layers"):
+            OpenRegionSettings(pml_mesh_layers=1).validate()
+
+    def test_abc_has_closed_separate_huygens_and_termination_surfaces(self):
+        design = AntennaDesign(
+            radial_length=55e-3,
+            straight_lengths=(50e-3,),
+            coils=(),
+        )
+        options = SimulationOptions(
+            mesh=MeshSettings(
+                wavelength_resolution=0.5,
+                air_margin_wavelengths=0.10,
+            ),
+            open_region=OpenRegionSettings(
+                mode="abc",
+                abc_buffer_wavelengths=0.10,
+            ),
+            solve=False,
+            verbose=False,
+        )
+
+        artifacts = build_model(design, options)
+
+        self.assertEqual(len(artifacts.farfield_selection.tags), 6)
+        self.assertEqual(len(artifacts.open_region_volumes), 7)
+        self.assertEqual(
+            set(artifacts.termination_selection.tags),
+            set(artifacts.outer_boundary_tags),
+        )
+        self.assertFalse(
+            set(artifacts.farfield_selection.tags)
+            & set(artifacts.termination_selection.tags)
+        )
+
     def test_solver_selection_maps_to_emerge_and_reports_missing_backend(self):
         model = SimpleNamespace(set_solver=Mock())
         _configure_solver(model, "cudss")
@@ -135,6 +184,24 @@ class DesignTests(unittest.TestCase):
 
         self.assertEqual(restored, original)
 
+    def test_legacy_two_coil_optimizer_result_is_migrated(self):
+        original = AntennaDesign()
+        legacy = {
+            "wire_radius": original.wire_radius,
+            "radial_length": original.radial_length,
+            "radial_angle_deg": original.radial_angle_deg,
+            "radial_count": original.radial_count,
+            "bottom_length": original.straight_lengths[0],
+            "middle_length": original.straight_lengths[1],
+            "top_length": original.straight_lengths[2],
+            "coil1": asdict(original.coils[0]),
+            "coil2": asdict(original.coils[1]),
+            "port_height": original.port_height,
+            "port_impedance": original.port_impedance,
+        }
+
+        self.assertEqual(design_from_dict(legacy), original)
+
     def test_straight_section_count_must_match_coils(self):
         design = AntennaDesign(
             straight_lengths=(100e-3,),
@@ -142,6 +209,91 @@ class DesignTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "exactly one more"):
             design.validate()
+
+    def test_matching_convergence_certificate_is_accepted(self):
+        design = AntennaDesign()
+        mesh = replace(
+            MeshSettings(),
+            wavelength_resolution=0.33,
+            air_margin_wavelengths=0.25,
+        )
+        open_region = OpenRegionSettings()
+        payload = {
+            "schema_version": 1,
+            "passed": True,
+            "frequency_hz": 868e6,
+            "design_fingerprint": design_fingerprint(design),
+            "selected_configuration": selected_open_region_configuration(
+                mesh, open_region
+            ),
+            "samples": {
+                "selected": {"peak_gain_dbi": 4.0},
+                "air": {"peak_gain_dbi": 4.0},
+                "boundary": {"peak_gain_dbi": 4.0},
+                "mesh": {"peak_gain_dbi": 4.0},
+            },
+            "comparisons": [
+                {"passed": True, "selected": "selected", "reference": "air"},
+                {
+                    "passed": True,
+                    "selected": "selected",
+                    "reference": "boundary",
+                },
+                {"passed": True, "selected": "selected", "reference": "mesh"},
+            ],
+        }
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary)/"certificate.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            restored = validate_convergence_certificate(
+                path,
+                design,
+                mesh,
+                open_region,
+                868e6,
+            )
+
+        self.assertTrue(restored["passed"])
+
+    def test_mismatched_convergence_certificate_is_rejected(self):
+        design = AntennaDesign()
+        mesh = MeshSettings(wavelength_resolution=0.33)
+        open_region = OpenRegionSettings()
+        payload = {
+            "schema_version": 1,
+            "passed": True,
+            "frequency_hz": 868e6,
+            "design_fingerprint": design_fingerprint(design),
+            "selected_configuration": selected_open_region_configuration(
+                mesh, open_region
+            ),
+            "samples": {
+                "selected": {},
+                "air": {},
+                "boundary": {},
+                "mesh": {},
+            },
+            "comparisons": [
+                {"passed": True, "selected": "selected", "reference": "air"},
+                {
+                    "passed": True,
+                    "selected": "selected",
+                    "reference": "boundary",
+                },
+                {"passed": True, "selected": "selected", "reference": "mesh"},
+            ],
+        }
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary)/"certificate.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "do not match"):
+                validate_convergence_certificate(
+                    path,
+                    design,
+                    replace(mesh, wavelength_resolution=0.25),
+                    open_region,
+                    868e6,
+                )
 
     def test_objective_reports_best_successful_record(self):
         space = DesignSpace(

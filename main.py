@@ -168,10 +168,17 @@ def report_s11(result) -> None:
 
 def report_farfield(result) -> None:
     field = result.raw_data.field.find(freq=F0)
-    selection = result.artifacts.absorbing_selection
-    ff_xz = field.farfield_2d((0, 0, 1), (0, 1, 0), selection, (-180, 180))
-    ff_yz = field.farfield_2d((0, 0, 1), (-1, 0, 0), selection, (-180, 180))
-    ff_xy = field.farfield_2d((1, 0, 0), (0, 0, 1), selection, (-180, 180))
+    selection = result.artifacts.farfield_selection
+    origin = result.artifacts.farfield_origin
+    ff_xz = field.farfield_2d(
+        (0, 0, 1), (0, 1, 0), selection, (-180, 180), origin=origin
+    )
+    ff_yz = field.farfield_2d(
+        (0, 0, 1), (-1, 0, 0), selection, (-180, 180), origin=origin
+    )
+    ff_xy = field.farfield_2d(
+        (1, 0, 0), (0, 0, 1), selection, (-180, 180), origin=origin
+    )
 
     print()
     print(f"FAR-FIELD GAIN @ {F0/MHz:.1f} MHz")

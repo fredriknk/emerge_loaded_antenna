@@ -54,6 +54,14 @@ def result_summary(result: SimulationResult) -> dict:
         "mesh_nodes": result.artifacts.mesh_nodes,
         "mesh_elements": result.artifacts.mesh_elements,
         "volume_elements": result.artifacts.volume_elements,
+        "open_region": asdict(result.options.open_region),
+        "mesh_settings": asdict(result.options.mesh),
+        "huygens_face_count": len(result.artifacts.farfield_selection.tags),
+        "termination_face_count": (
+            len(result.artifacts.termination_selection.tags)
+            if result.artifacts.termination_selection is not None
+            else len(result.artifacts.outer_boundary_tags)
+        ),
         "frequencies_hz": result.frequencies.tolist(),
         "s11_db": result.s11_db.tolist(),
     }
@@ -73,6 +81,12 @@ def print_summary(name: str, summary: dict) -> None:
     print(f"Horizon minimum : {summary['horizon_min_gain_dbi']:.3f} dBi")
     print(f"Horizon mean    : {summary['horizon_mean_gain_dbi']:.3f} dBi")
     print(f"Horizon ripple  : {summary['horizon_ripple_p90_p10_db']:.3f} dB")
+    region = summary["open_region"]
+    print(
+        f"Open region     : {region['mode'].upper()}, "
+        f"{summary['huygens_face_count']} closed Huygens faces, "
+        f"{summary['termination_face_count']} termination faces"
+    )
     print(f"Antenna height  : {summary['antenna_height_m']*1e3:.2f} mm")
     print(
         f"Mesh            : {summary['mesh_nodes']} nodes, "
@@ -111,17 +125,33 @@ def save_plots(result: SimulationResult, output: Path) -> None:
     plt.close(polar)
 
     field = result.raw_data.field.find(freq=FREQUENCY)
-    faces = result.artifacts.absorbing_selection
+    faces = result.artifacts.farfield_selection
+    origin = result.artifacts.farfield_origin
     points = max(361, int(round(360/result.options.farfield_angular_step_deg)) + 1)
     cuts = {
         "X-Z": field.farfield_2d(
-            (0, 0, 1), (0, 1, 0), faces, (-180, 180), Npoints=points
+            (0, 0, 1),
+            (0, 1, 0),
+            faces,
+            (-180, 180),
+            Npoints=points,
+            origin=origin,
         ),
         "Y-Z": field.farfield_2d(
-            (0, 0, 1), (-1, 0, 0), faces, (-180, 180), Npoints=points
+            (0, 0, 1),
+            (-1, 0, 0),
+            faces,
+            (-180, 180),
+            Npoints=points,
+            origin=origin,
         ),
         "X-Y": field.farfield_2d(
-            (1, 0, 0), (0, 0, 1), faces, (-180, 180), Npoints=points
+            (1, 0, 0),
+            (0, 0, 1),
+            faces,
+            (-180, 180),
+            Npoints=points,
+            origin=origin,
         ),
     }
     fig, axis = plt.subplots(figsize=(9, 5.5))

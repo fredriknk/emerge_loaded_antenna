@@ -10,11 +10,21 @@ if _venv_mkl is not None:
 
 from .config import (
     AntennaDesign,
+    ABC_TYPES,
     CoilDesign,
     FrequencySweep,
     MeshSettings,
+    OPEN_REGION_MODES,
+    OpenRegionSettings,
     SOLVER_CHOICES,
     SimulationOptions,
+)
+from .convergence import (
+    CONVERGENCE_SCHEMA_VERSION,
+    design_fingerprint,
+    load_convergence_certificate,
+    selected_open_region_configuration,
+    validate_convergence_certificate,
 )
 from .geometry import AntennaPath, CompositeCurve, build_centerline
 from .optimize import (
@@ -37,9 +47,11 @@ from .serialization import design_from_dict, load_design, save_design
 
 __all__ = [
     "AntennaDesign",
+    "ABC_TYPES",
     "AntennaPath",
     "CoilDesign",
     "CompositeCurve",
+    "CONVERGENCE_SCHEMA_VERSION",
     "DesignSpace",
     "DesignVariable",
     "EvaluationCallback",
@@ -50,14 +62,20 @@ __all__ = [
     "MeshSettings",
     "ModelArtifacts",
     "RobustGainObjective",
+    "OPEN_REGION_MODES",
+    "OpenRegionSettings",
     "SOLVER_CHOICES",
     "S11Objective",
     "SimulationOptions",
     "SimulationResult",
     "build_centerline",
     "build_model",
+    "design_fingerprint",
     "design_from_dict",
     "load_design",
+    "load_convergence_certificate",
     "save_design",
+    "selected_open_region_configuration",
     "simulate",
+    "validate_convergence_certificate",
 ]

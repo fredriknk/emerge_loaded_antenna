@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import os
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ if _venv_mkl is not None:
 import emerge as em  # noqa: E402
 import gmsh  # noqa: E402
 
-from .config import AntennaDesign, SimulationOptions
+from .config import AntennaDesign, OpenRegionSettings, SimulationOptions
 from .geometry import CompositeCurve, AntennaPath, build_centerline
 
 C0 = 299_792_458.0
@@ -36,11 +37,52 @@ class ModelArtifacts:
     feed: Any
     feed_polygon: Any
     airbox: Any
-    absorbing_selection: Any
+    open_region_volumes: tuple[Any, ...]
+    pml_volumes: tuple[Any, ...]
+    farfield_selection: Any
+    termination_selection: Any | None
+    open_region_mode: str
+    farfield_origin: tuple[float, float, float]
+    outer_boundary_tags: tuple[int, ...]
     port: Any
     mesh_nodes: int
     mesh_elements: int
     volume_elements: int
+
+    @property
+    def absorbing_selection(self) -> Any:
+        """Backward-compatible name for the far-field integration surface."""
+        return self.farfield_selection
+
+
+@dataclass(frozen=True)
+class _OpenRegionBounds:
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    zmin: float
+    zmax: float
+
+    @property
+    def dimensions(self) -> tuple[float, float, float]:
+        return (
+            self.xmax - self.xmin,
+            self.ymax - self.ymin,
+            self.zmax - self.zmin,
+        )
+
+    @property
+    def corner(self) -> tuple[float, float, float]:
+        return (self.xmin, self.ymin, self.zmin)
+
+    @property
+    def center(self) -> tuple[float, float, float]:
+        return (
+            (self.xmin + self.xmax)/2,
+            (self.ymin + self.ymax)/2,
+            (self.zmin + self.zmax)/2,
+        )
 
 
 @dataclass(frozen=True)
@@ -123,6 +165,13 @@ class SimulationResult:
             "mesh_nodes": self.artifacts.mesh_nodes,
             "mesh_elements": self.artifacts.mesh_elements,
             "volume_elements": self.artifacts.volume_elements,
+            "open_region_mode": self.artifacts.open_region_mode,
+            "huygens_face_count": len(
+                self.artifacts.farfield_selection.tags
+            ),
+            "outer_boundary_face_count": len(
+                self.artifacts.outer_boundary_tags
+            ),
         }
         if self.farfield_metrics is not None:
             values["farfield_metrics"] = self.farfield_metrics.as_dict()
@@ -213,6 +262,91 @@ def _configure_solver(model: em.Simulation, solver_name: str) -> None:
         ) from error
 
 
+def _build_open_region(
+    bounds: _OpenRegionBounds,
+    wavelength: float,
+    settings: OpenRegionSettings,
+) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]]:
+    """Create the inner air box and its selected six-sided termination."""
+    width, depth, height = bounds.dimensions
+    if settings.mode == "abc":
+        buffer = settings.abc_buffer_wavelengths*wavelength
+        airbox = em.geo.Box(
+            width=width,
+            depth=depth,
+            height=height,
+            position=bounds.corner,
+            name="HuygensAirbox",
+        )
+        shell = (
+            em.geo.Box(
+                buffer,
+                depth + 2*buffer,
+                height + 2*buffer,
+                (bounds.xmin - buffer, bounds.ymin - buffer, bounds.zmin - buffer),
+                name="ABCBufferLeft",
+            ),
+            em.geo.Box(
+                buffer,
+                depth + 2*buffer,
+                height + 2*buffer,
+                (bounds.xmax, bounds.ymin - buffer, bounds.zmin - buffer),
+                name="ABCBufferRight",
+            ),
+            em.geo.Box(
+                width,
+                buffer,
+                height + 2*buffer,
+                (bounds.xmin, bounds.ymin - buffer, bounds.zmin - buffer),
+                name="ABCBufferFront",
+            ),
+            em.geo.Box(
+                width,
+                buffer,
+                height + 2*buffer,
+                (bounds.xmin, bounds.ymax, bounds.zmin - buffer),
+                name="ABCBufferBack",
+            ),
+            em.geo.Box(
+                width,
+                depth,
+                buffer,
+                (bounds.xmin, bounds.ymin, bounds.zmin - buffer),
+                name="ABCBufferBottom",
+            ),
+            em.geo.Box(
+                width,
+                depth,
+                buffer,
+                (bounds.xmin, bounds.ymin, bounds.zmax),
+                name="ABCBufferTop",
+            ),
+        )
+        volumes = (airbox, *shell)
+        for volume in volumes:
+            volume.background()
+        return airbox, volumes, ()
+
+    pml_thickness = settings.pml_thickness_wavelengths*wavelength
+    volumes = em.geo.pmlbox(
+        width=width,
+        depth=depth,
+        height=height,
+        position=bounds.corner,
+        material=em.lib.AIR,
+        thickness=pml_thickness,
+        Nlayers=1,
+        N_mesh_layers=settings.pml_mesh_layers,
+        exponent=settings.pml_exponent,
+        deltamax=settings.pml_delta_max,
+        sides="tblrfa",
+    )
+    for index, volume in enumerate(volumes):
+        volume.give_name("Airbox" if index == 0 else f"PML{index:02d}")
+        volume.background()
+    return volumes[0], tuple(volumes), tuple(volumes[1:])
+
+
 def build_model(
     design: AntennaDesign | None = None,
     options: SimulationOptions | None = None,
@@ -228,6 +362,11 @@ def build_model(
     if options.verbose:
         _print_design(design, path)
 
+    # EMerge simulations own reference cycles. If a previous optimizer result
+    # is collected after the next SimState signs on, its destructor clears the
+    # process-global selection interface used by the new model. Collect those
+    # stale cycles before creating any new EMerge geometry.
+    gc.collect()
     model = em.Simulation(
         options.model_name,
         loglevel="INFO" if options.verbose else "ERROR",
@@ -330,13 +469,34 @@ def build_model(
     )
     zmin = radial_lowest_z - air_margin
     zmax = float(np.max(zpts)) + air_margin
-    airbox = em.geo.Box(
-        width=xmax - xmin,
-        depth=ymax - ymin,
-        height=zmax - zmin,
-        position=(xmin, ymin, zmin),
-        name="Airbox",
-    ).background()
+    open_region_bounds = _OpenRegionBounds(
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        zmin=zmin,
+        zmax=zmax,
+    )
+    airbox, open_region_volumes, pml_volumes = _build_open_region(
+        open_region_bounds,
+        wavelength,
+        options.open_region,
+    )
+
+    if options.verbose:
+        print(f"Open-region mode    : {options.open_region.mode.upper()} (all 6 sides)")
+        print(f"Inner air margin    : {mesh.air_margin_wavelengths:.3f} wavelengths")
+        if options.open_region.mode == "abc":
+            print(
+                "ABC air buffer      : "
+                f"{options.open_region.abc_buffer_wavelengths:.3f} wavelengths"
+            )
+        else:
+            print(
+                "PML thickness       : "
+                f"{options.open_region.pml_thickness_wavelengths:.3f} wavelengths, "
+                f"{options.open_region.pml_mesh_layers} mesh layers"
+            )
 
     if options.show_geometry:
         model.view(use_gmsh=True)
@@ -369,8 +529,30 @@ def build_model(
     if options.show_mesh:
         model.view(plot_mesh=True, volume_mesh=False)
 
-    absorbing_selection = airbox.boundary(exclude=("bottom",))
-    model.mw.bc.AbsorbingBoundary(absorbing_selection)
+    farfield_selection = airbox.boundary()
+    if len(farfield_selection.tags) != 6:
+        raise RuntimeError(
+            "The closed Huygens surface must contain exactly six faces; "
+            f"EMerge returned {len(farfield_selection.tags)}."
+        )
+    outer_boundary_tags = tuple(model.mesher.domain_boundary_face_tags)
+    termination_selection = None
+    if options.open_region.mode == "abc":
+        termination_selection = em.FaceSelection(list(outer_boundary_tags))
+        if set(farfield_selection.tags) & set(termination_selection.tags):
+            raise RuntimeError(
+                "The ABC termination unexpectedly touches the Huygens surface."
+            )
+        model.mw.bc.AbsorbingBoundary(
+            termination_selection,
+            order=options.open_region.abc_order,
+            origin=open_region_bounds.center,
+            abctype=options.open_region.abc_type,
+        )
+    elif set(farfield_selection.tags) & set(outer_boundary_tags):
+        raise RuntimeError(
+            "The PML Huygens surface unexpectedly touches the exterior boundary."
+        )
     port_selection = feed.boundary(exclude=("front", "back"))
     port = model.mw.bc.LumpedPort(
         port_selection,
@@ -389,7 +571,13 @@ def build_model(
         feed=feed,
         feed_polygon=feed_polygon,
         airbox=airbox,
-        absorbing_selection=absorbing_selection,
+        open_region_volumes=open_region_volumes,
+        pml_volumes=pml_volumes,
+        farfield_selection=farfield_selection,
+        termination_selection=termination_selection,
+        open_region_mode=options.open_region.mode,
+        farfield_origin=open_region_bounds.center,
+        outer_boundary_tags=outer_boundary_tags,
         port=port,
         mesh_nodes=mesh_nodes,
         mesh_elements=mesh_elements,
@@ -444,9 +632,10 @@ def simulate(
         thetas = np.linspace(0.0, np.pi, theta_count)
         phis = np.linspace(-np.pi, np.pi, phi_count)
         farfield_3d = field.farfield_3d(
-            artifacts.absorbing_selection,
+            artifacts.farfield_selection,
             thetas=thetas,
             phis=phis,
+            origin=artifacts.farfield_origin,
         )
         farfield_metrics = _farfield_metrics(
             farfield_3d,
