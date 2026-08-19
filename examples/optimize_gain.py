@@ -499,7 +499,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-auto-convergence",
         action="store_true",
-        help="fail instead of generating a missing or mismatched certificate",
+        help="do not generate a missing or mismatched certificate",
+    )
+    parser.add_argument(
+        "--require-convergence",
+        action="store_true",
+        help="abort unless a matching convergence certificate passes",
     )
     parser.add_argument(
         "--solver",
@@ -509,6 +514,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--polish", action="store_true")
     args = parser.parse_args()
+    if args.skip_convergence_check and args.require_convergence:
+        parser.error(
+            "--skip-convergence-check and --require-convergence conflict"
+        )
     if not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0:
         parser.error("--frequency-mhz must be finite and positive")
     args.frequency_hz = args.frequency_mhz*1e6
@@ -624,13 +633,33 @@ def _number_list(*values: float) -> str:
     return ",".join(f"{value:.12g}" for value in values)
 
 
+def handle_uncertified_convergence(
+    args: argparse.Namespace,
+    detail: str,
+) -> None:
+    """Warn by default, or abort when strict convergence was requested."""
+    if getattr(args, "require_convergence", False):
+        raise SystemExit(
+            "OPEN-REGION CONVERGENCE REQUIRED BUT NOT CERTIFIED\n"
+            f"{detail}"
+        )
+    args.convergence_warning = detail
+    print("\nWARNING: OPEN-REGION CONVERGENCE NOT CERTIFIED")
+    print(detail)
+    print(
+        "Optimization will continue with uncertified numerical settings. "
+        "Use --require-convergence to make this fatal.\n",
+        flush=True,
+    )
+
+
 def ensure_convergence_certificate(
     args: argparse.Namespace,
     benchmark: AntennaDesign,
     mesh: MeshSettings,
     open_region: OpenRegionSettings,
     frequency_hz: float,
-) -> dict:
+) -> dict | None:
     """Certify numerical settings on a frequency-scaled reference problem."""
     try:
         return validate_convergence_certificate(
@@ -641,13 +670,33 @@ def ensure_convergence_certificate(
             frequency_hz,
         )
     except RuntimeError as error:
+        if args.convergence_report.is_file():
+            try:
+                existing_report = validate_convergence_certificate(
+                    args.convergence_report,
+                    benchmark,
+                    mesh,
+                    open_region,
+                    frequency_hz,
+                    require_passed=False,
+                )
+            except RuntimeError:
+                pass
+            else:
+                if existing_report.get("passed") is False:
+                    handle_uncertified_convergence(
+                        args,
+                        "The existing matching convergence report failed.\n"
+                        f"See {args.convergence_report.resolve()} for details.",
+                    )
+                    return None
         if args.no_auto_convergence:
-            raise SystemExit(
-                f"OPEN-REGION PREFLIGHT FAILED\n{error}\n\n"
-                "Automatic convergence is disabled. Run "
-                "examples/check_open_region.py manually or remove "
-                "--no-auto-convergence."
-            ) from error
+            handle_uncertified_convergence(
+                args,
+                f"Certificate unavailable: {error}\n"
+                "Automatic convergence is disabled by --no-auto-convergence.",
+            )
+            return None
 
         print("OPEN-REGION PREFLIGHT")
         print(f"Certificate     : unavailable ({error})")
@@ -686,10 +735,12 @@ def ensure_convergence_certificate(
         )
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
-            raise SystemExit(
-                "AUTOMATIC OPEN-REGION CONVERGENCE FAILED\n"
-                f"See {args.convergence_report.resolve()} for the failed checks."
+            handle_uncertified_convergence(
+                args,
+                "Automatic open-region convergence failed.\n"
+                f"See {args.convergence_report.resolve()} for the failed checks.",
             )
+            return None
 
         try:
             return validate_convergence_certificate(
@@ -700,10 +751,12 @@ def ensure_convergence_certificate(
                 frequency_hz,
             )
         except RuntimeError as validation_error:
-            raise SystemExit(
-                "AUTOMATIC OPEN-REGION CONVERGENCE PRODUCED AN INVALID REPORT\n"
-                f"{validation_error}"
-            ) from validation_error
+            handle_uncertified_convergence(
+                args,
+                "Automatic convergence produced an invalid report:\n"
+                f"{validation_error}",
+            )
+            return None
 
 
 def run_campaign(args: argparse.Namespace) -> None:
@@ -723,6 +776,7 @@ def run_campaign(args: argparse.Namespace) -> None:
         abc_buffer_wavelengths=args.abc_buffer_wavelengths,
     )
     certificate = None
+    args.convergence_warning = None
     if not args.skip_convergence_check:
         certificate = ensure_convergence_certificate(
             args,
@@ -738,8 +792,16 @@ def run_campaign(args: argparse.Namespace) -> None:
         "target_frequency_hz": frequency_hz,
         "match_bandwidth_hz": args.match_bandwidth_mhz*1e6,
         "farfield_angular_step_deg": args.angular_step,
+        "convergence_status": (
+            "skipped"
+            if args.skip_convergence_check
+            else "passed" if certificate else "warning"
+        ),
+        "convergence_warning": args.convergence_warning,
         "convergence_report": (
-            str(args.convergence_report.resolve()) if certificate else None
+            None
+            if args.skip_convergence_check
+            else str(args.convergence_report.resolve())
         ),
     }
     run_count = len(args.seeds)*len(args.turn_cases)
@@ -783,8 +845,13 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"{open_region.abc_buffer_wavelengths:.2f} lambda all-face ABC buffer"
     )
     print(f"Air resolution  : {mesh.wavelength_resolution:.2f} wavelengths")
-    if certificate is None:
+    if args.skip_convergence_check:
         print("Preflight       : SKIPPED BY USER")
+    elif certificate is None:
+        print(
+            "Preflight       : WARNING - NOT CERTIFIED "
+            f"({args.convergence_report.resolve()})"
+        )
     else:
         print(f"Preflight       : PASS ({args.convergence_report.resolve()})")
     print(f"Variables       : {variable_count} continuous")

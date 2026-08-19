@@ -52,8 +52,11 @@ def selected_open_region_configuration(
     return values
 
 
-def load_convergence_certificate(path: str | Path) -> dict[str, Any]:
-    """Load a convergence report and reject malformed/non-passing reports."""
+def load_convergence_certificate(
+    path: str | Path,
+    require_passed: bool = True,
+) -> dict[str, Any]:
+    """Load a convergence report, optionally accepting a completed failure."""
     report_path = Path(path)
     if not report_path.exists():
         raise RuntimeError(
@@ -69,10 +72,16 @@ def load_convergence_certificate(path: str | Path) -> dict[str, Any]:
         raise RuntimeError(
             f"Unsupported open-region certificate schema in {report_path}."
         )
-    if payload.get("passed") is not True:
+    if not isinstance(payload.get("passed"), bool):
+        raise RuntimeError(
+            f"Open-region certificate {report_path} has no pass/fail result."
+        )
+    if require_passed and payload.get("passed") is not True:
         raise RuntimeError(
             f"Open-region convergence did not pass in {report_path}."
         )
+    if not require_passed:
+        return payload
     samples = payload.get("samples")
     if not isinstance(samples, dict) or len(samples) < 4:
         raise RuntimeError(
@@ -104,9 +113,10 @@ def validate_convergence_certificate(
     mesh: MeshSettings,
     open_region: OpenRegionSettings,
     frequency_hz: float,
+    require_passed: bool = True,
 ) -> dict[str, Any]:
     """Ensure a certificate covers this numerical reference and configuration."""
-    payload = load_convergence_certificate(path)
+    payload = load_convergence_certificate(path, require_passed=require_passed)
     if payload.get("design_fingerprint") != design_fingerprint(reference_design):
         raise RuntimeError(
             "The convergence certificate was generated for a different "

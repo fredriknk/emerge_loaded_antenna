@@ -182,8 +182,19 @@ certificate such as
 mismatched, it runs seven isolated solves that vary Huygens clearance, ABC
 distance, and air-mesh resolution. This preflight uses a wavelength-scaled
 numerical reference problem, independently of the user's starting antenna, so
-poor initial S11 or gain cannot block a new search. The certificate is reused
-for later runs with matching frequency and numerical settings.
+poor initial S11 or gain cannot block a new search. A passing certificate is
+reused for later runs with matching frequency and numerical settings.
+
+If the automatic comparison fails, the default is to print a prominent
+warning, record `convergence_status: "warning"` in every result, and continue
+the optimization. Use strict mode when an uncertified campaign must not start:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --frequency-mhz 915 `
+    --hours 12 `
+    --require-convergence
+```
 
 The convergence campaign can also be run explicitly:
 
@@ -192,9 +203,10 @@ The convergence campaign can also be run explicitly:
     --frequency-mhz 915
 ```
 
-`--no-auto-convergence` restores fail-fast behavior when a pre-generated report
-is required by an automated workflow. `--skip-convergence-check` remains an
-explicit escape hatch for experiments, but such gain values are not certified.
+`--no-auto-convergence` prevents generation and reuses a matching report when
+available; otherwise it warns and continues, or aborts when combined with
+`--require-convergence`. `--skip-convergence-check` bypasses even certificate
+validation and cannot be combined with strict mode.
 
 After preflight, the recommended campaign runs four independent
 differential-evolution populations and divides the requested time budget

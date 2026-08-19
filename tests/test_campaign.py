@@ -157,6 +157,20 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
         self.assertEqual(three.solver, "cudss")
 
+    def test_strict_and_skipped_convergence_flags_conflict(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--skip-convergence-check",
+                    "--require-convergence",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
     def test_missing_certificate_is_generated_automatically(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -166,6 +180,7 @@ class CampaignTests(unittest.TestCase):
                 output=root/"campaign",
                 solver="auto",
                 no_auto_convergence=False,
+                require_convergence=False,
             )
             certificate = {"passed": True}
             with (
@@ -204,6 +219,7 @@ class CampaignTests(unittest.TestCase):
             output=Path("campaign"),
             solver="auto",
             no_auto_convergence=False,
+            require_convergence=False,
         )
         certificate = {"passed": True}
         with (
@@ -224,13 +240,14 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result, certificate)
         run.assert_not_called()
 
-    def test_no_auto_convergence_preserves_fail_fast_behavior(self):
+    def test_no_auto_convergence_warns_when_not_strict(self):
         args = Namespace(
             convergence_report=Path("missing.json"),
             warm_start=Path("campaign_best.json"),
             output=Path("campaign"),
             solver="auto",
             no_auto_convergence=True,
+            require_convergence=False,
         )
         with (
             patch(
@@ -238,7 +255,34 @@ class CampaignTests(unittest.TestCase):
                 side_effect=RuntimeError("not found"),
             ),
             patch("examples.optimize_gain.subprocess.run") as run,
-            self.assertRaisesRegex(SystemExit, "Automatic convergence is disabled"),
+        ):
+            result = ensure_convergence_certificate(
+                args,
+                AntennaDesign(),
+                MeshSettings(),
+                OpenRegionSettings(),
+                REFERENCE_DESIGN_FREQUENCY_HZ,
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Automatic convergence is disabled", args.convergence_warning)
+        run.assert_not_called()
+
+    def test_require_convergence_makes_missing_certificate_fatal(self):
+        args = Namespace(
+            convergence_report=Path("missing.json"),
+            output=Path("campaign"),
+            solver="auto",
+            no_auto_convergence=True,
+            require_convergence=True,
+        )
+        with (
+            patch(
+                "examples.optimize_gain.validate_convergence_certificate",
+                side_effect=RuntimeError("not found"),
+            ),
+            patch("examples.optimize_gain.subprocess.run") as run,
+            self.assertRaisesRegex(SystemExit, "REQUIRED BUT NOT CERTIFIED"),
         ):
             ensure_convergence_certificate(
                 args,
@@ -249,6 +293,90 @@ class CampaignTests(unittest.TestCase):
             )
 
         run.assert_not_called()
+
+    def test_failed_automatic_convergence_warns_or_fails_in_strict_mode(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            common = dict(
+                convergence_report=root/"failed.json",
+                output=root/"campaign",
+                solver="auto",
+                no_auto_convergence=False,
+            )
+            with (
+                patch(
+                    "examples.optimize_gain.validate_convergence_certificate",
+                    side_effect=RuntimeError("not found"),
+                ),
+                patch(
+                    "examples.optimize_gain.subprocess.run",
+                    return_value=SimpleNamespace(returncode=2),
+                ),
+            ):
+                warning_args = Namespace(
+                    **common,
+                    require_convergence=False,
+                )
+                result = ensure_convergence_certificate(
+                    warning_args,
+                    AntennaDesign(),
+                    MeshSettings(),
+                    OpenRegionSettings(),
+                    REFERENCE_DESIGN_FREQUENCY_HZ,
+                )
+                self.assertIsNone(result)
+                self.assertIn("convergence failed", warning_args.convergence_warning)
+
+                strict_args = Namespace(
+                    **common,
+                    require_convergence=True,
+                )
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "REQUIRED BUT NOT CERTIFIED",
+                ):
+                    ensure_convergence_certificate(
+                        strict_args,
+                        AntennaDesign(),
+                        MeshSettings(),
+                        OpenRegionSettings(),
+                        REFERENCE_DESIGN_FREQUENCY_HZ,
+                    )
+
+    def test_matching_failed_report_warns_without_rerunning_solves(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root/"failed.json"
+            report.write_text("{}", encoding="utf-8")
+            args = Namespace(
+                convergence_report=report,
+                output=root/"campaign",
+                solver="auto",
+                no_auto_convergence=False,
+                require_convergence=False,
+            )
+            with (
+                patch(
+                    "examples.optimize_gain.validate_convergence_certificate",
+                    side_effect=(
+                        RuntimeError("did not pass"),
+                        {"passed": False},
+                    ),
+                ) as validate,
+                patch("examples.optimize_gain.subprocess.run") as run,
+            ):
+                result = ensure_convergence_certificate(
+                    args,
+                    AntennaDesign(),
+                    MeshSettings(),
+                    OpenRegionSettings(),
+                    REFERENCE_DESIGN_FREQUENCY_HZ,
+                )
+
+            self.assertIsNone(result)
+            self.assertEqual(validate.call_count, 2)
+            self.assertIn("existing matching", args.convergence_warning)
+            run.assert_not_called()
 
     def test_progress_checkpoints_each_new_best(self):
         space = make_space(AntennaDesign())
