@@ -36,13 +36,46 @@ straight section as it could with one global BSpline.
 
 The package is intended for:
 
-* Python 3.10–3.13
+* Python 3.12–3.13
 * EMerge 2.8.4
 * NumPy
 
-Install the project in editable mode inside the existing virtual environment:
+## Environment setup
+
+Run these commands from the repository root. The `.venv` folder is local to
+this project and is ignored by git.
+
+On Windows PowerShell:
 
 ```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify]"
+```
+
+If PowerShell blocks activation scripts, you can still use the full
+`.\.venv\Scripts\python.exe` commands above. To activate the environment for
+the current terminal session:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+On macOS or Linux:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[optimize,verify]"
+```
+
+If Python 3.13 is not installed but you have `uv`, let `uv` create the
+environment:
+
+```powershell
+uv venv .venv --python 3.13 --seed
 .\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify]"
 ```
 
