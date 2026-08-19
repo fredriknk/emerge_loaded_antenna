@@ -317,14 +317,19 @@ Verify a campaign winner with:
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\verify_best.py `
     .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json `
+    --show-model `
+    --show-mesh `
     --show-3d
 ```
 
 This repeats the design on coarse and fine meshes, samples the 3D pattern at
 0.5-degree resolution, infers the target frequency from the campaign result,
 reports peak direction and horizon statistics, and saves S11, XY/horizon and
-XZ/YZ/XY plots plus JSON convergence data. For a final seven-probe open-region
-certificate on the actual winner, run:
+XZ/YZ/XY plots plus JSON convergence data. `--show-model` opens the final
+geometry before meshing, `--show-mesh` opens its generated surface mesh, and
+`--show-3d` displays the solved far-field lobe. The model and mesh viewers are
+only enabled for the fine verification solve, not the preliminary coarse solve.
+For a final seven-probe open-region certificate on the actual winner, run:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\check_open_region.py `

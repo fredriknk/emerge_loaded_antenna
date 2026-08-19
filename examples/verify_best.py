@@ -200,6 +200,9 @@ def options(
     solver: str,
     frequency_hz: float,
     sweep_bandwidth_hz: float,
+    *,
+    show_model: bool = False,
+    show_mesh: bool = False,
 ) -> SimulationOptions:
     return SimulationOptions(
         sweep=FrequencySweep(
@@ -213,6 +216,8 @@ def options(
         compute_farfield=True,
         farfield_frequency=frequency_hz,
         farfield_angular_step_deg=angular_step,
+        show_geometry=show_model,
+        show_mesh=show_mesh,
         verbose=True,
     )
 
@@ -247,6 +252,16 @@ def parse_args() -> argparse.Namespace:
         help="linear solver backend (default: %(default)s)",
     )
     parser.add_argument("--skip-coarse", action="store_true")
+    parser.add_argument(
+        "--show-model",
+        action="store_true",
+        help="open the final verification geometry in the Gmsh viewer",
+    )
+    parser.add_argument(
+        "--show-mesh",
+        action="store_true",
+        help="open the final verification surface mesh in the Gmsh viewer",
+    )
     parser.add_argument("--show-3d", action="store_true")
     args = parser.parse_args()
     if args.frequency_mhz is not None and (
@@ -336,6 +351,8 @@ def main() -> None:
             args.solver,
             frequency_hz,
             sweep_bandwidth_hz,
+            show_model=args.show_model,
+            show_mesh=args.show_mesh,
         ),
     )
     payload["fine"] = result_summary(fine_result, frequency_hz)
