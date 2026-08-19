@@ -4,13 +4,20 @@ from argparse import Namespace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from emerge_loaded_antenna import AntennaDesign, EvaluationRecord
+from emerge_loaded_antenna import (
+    AntennaDesign,
+    EvaluationRecord,
+    MeshSettings,
+    OpenRegionSettings,
+)
 from examples.optimize_gain import (
     CampaignProgress,
     design_for_coil_count,
+    ensure_convergence_certificate,
     iterations_per_run,
     make_space,
     parse_args,
@@ -70,6 +77,93 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(zero.turn_cases, ((),))
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
         self.assertEqual(three.solver, "cudss")
+
+    def test_missing_certificate_is_generated_automatically(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = Namespace(
+                convergence_report=root/"convergence.json",
+                warm_start=root/"best_result.json",
+                output=root/"campaign",
+                solver="auto",
+                no_auto_convergence=False,
+            )
+            certificate = {"passed": True}
+            with (
+                patch(
+                    "examples.optimize_gain.validate_convergence_certificate",
+                    side_effect=(RuntimeError("not found"), certificate),
+                ) as validate,
+                patch(
+                    "examples.optimize_gain.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as run,
+            ):
+                result = ensure_convergence_certificate(
+                    args,
+                    AntennaDesign(),
+                    MeshSettings(),
+                    OpenRegionSettings(),
+                )
+
+            self.assertEqual(result, certificate)
+            self.assertEqual(validate.call_count, 2)
+            self.assertEqual(run.call_count, 1)
+            command = run.call_args.args[0]
+            self.assertIn("check_open_region.py", command[2])
+            self.assertIn("--selected-resolution", command)
+            self.assertTrue((args.output/"baseline_design.json").exists())
+
+    def test_matching_certificate_is_reused_without_subprocess(self):
+        args = Namespace(
+            convergence_report=Path("convergence.json"),
+            warm_start=Path("best_result.json"),
+            output=Path("campaign"),
+            solver="auto",
+            no_auto_convergence=False,
+        )
+        certificate = {"passed": True}
+        with (
+            patch(
+                "examples.optimize_gain.validate_convergence_certificate",
+                return_value=certificate,
+            ),
+            patch("examples.optimize_gain.subprocess.run") as run,
+        ):
+            result = ensure_convergence_certificate(
+                args,
+                AntennaDesign(),
+                MeshSettings(),
+                OpenRegionSettings(),
+            )
+
+        self.assertEqual(result, certificate)
+        run.assert_not_called()
+
+    def test_no_auto_convergence_preserves_fail_fast_behavior(self):
+        args = Namespace(
+            convergence_report=Path("missing.json"),
+            warm_start=Path("best_result.json"),
+            output=Path("campaign"),
+            solver="auto",
+            no_auto_convergence=True,
+        )
+        with (
+            patch(
+                "examples.optimize_gain.validate_convergence_certificate",
+                side_effect=RuntimeError("not found"),
+            ),
+            patch("examples.optimize_gain.subprocess.run") as run,
+            self.assertRaisesRegex(SystemExit, "Automatic convergence is disabled"),
+        ):
+            ensure_convergence_certificate(
+                args,
+                AntennaDesign(),
+                MeshSettings(),
+                OpenRegionSettings(),
+            )
+
+        run.assert_not_called()
 
     def test_progress_checkpoints_each_new_best(self):
         space = make_space(AntennaDesign())

@@ -152,31 +152,34 @@ convert geometry/solver failures into a finite penalty.
 
 ### Twelve-hour robust campaign
 
-First certify the numerical domain around the same representative design that
-will be used as the optimizer warm start:
+Start the campaign directly:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
+```
+
+Before the optimization timer starts, the script checks
+`optimization_results/open_region_convergence.json`. If the report is missing
+or does not match the warm-start design and numerical settings, it
+automatically runs seven isolated solves that vary Huygens clearance, ABC
+distance, and air-mesh resolution. Optimization starts only after those checks
+pass. The certificate is reused on later runs with matching inputs.
+
+The convergence campaign can also be run explicitly:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
     .\optimization_results\best_result.json
 ```
 
-This runs seven isolated real solves. It varies the inner Huygens clearance,
-the distance to the all-face absorbing boundary, and the air-mesh resolution.
-A passing report is written to
-`optimization_results/open_region_convergence.json`.
+`--no-auto-convergence` restores fail-fast behavior when a pre-generated report
+is required by an automated workflow. `--skip-convergence-check` remains an
+explicit escape hatch for experiments, but such gain values are not certified.
 
-The recommended campaign then warm-starts from that same result, verifies the
-certificate, runs four independent differential-evolution populations, and
-divides the requested time budget between them:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
-```
-
-If a different warm start is supplied, pass it to both commands. The optimizer
-rejects a report generated for another design, frequency, boundary distance,
-or mesh resolution. `--skip-convergence-check` is available as an explicit
-escape hatch for experiments, but such gain values are not certified.
+After preflight, the recommended campaign warm-starts from
+`optimization_results/best_result.json`, runs four independent
+differential-evolution populations, and divides the requested time budget
+between them.
 
 The wall-time conversion assumes roughly eight seconds per robust evaluation;
 override it with `--seconds-per-eval` if the live ETA on your machine settles

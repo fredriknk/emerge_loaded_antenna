@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 
 os.environ.setdefault("EMERGE_STD_LOGLEVEL", "ERROR")
@@ -29,6 +31,7 @@ from emerge_loaded_antenna import (
     SOLVER_CHOICES,
     SimulationOptions,
     load_design,
+    save_design,
     selected_open_region_configuration,
     validate_convergence_certificate,
 )
@@ -410,12 +413,17 @@ def parse_args() -> argparse.Namespace:
         "--convergence-report",
         type=Path,
         default=Path("optimization_results/open_region_convergence.json"),
-        help="passing report from examples/check_open_region.py",
+        help="certificate path to reuse or generate automatically",
     )
     parser.add_argument(
         "--skip-convergence-check",
         action="store_true",
         help="run without a matching open-region certificate (not recommended)",
+    )
+    parser.add_argument(
+        "--no-auto-convergence",
+        action="store_true",
+        help="fail instead of generating a missing or mismatched certificate",
     )
     parser.add_argument(
         "--solver",
@@ -490,6 +498,89 @@ def iterations_per_run(
     return max(0, generations - 1)
 
 
+def _number_list(*values: float) -> str:
+    return ",".join(f"{value:.12g}" for value in values)
+
+
+def ensure_convergence_certificate(
+    args: argparse.Namespace,
+    baseline: AntennaDesign,
+    mesh: MeshSettings,
+    open_region: OpenRegionSettings,
+) -> dict:
+    """Load a matching certificate, generating it once when necessary."""
+    try:
+        return validate_convergence_certificate(
+            args.convergence_report,
+            baseline,
+            mesh,
+            open_region,
+            FREQUENCY,
+        )
+    except RuntimeError as error:
+        if args.no_auto_convergence:
+            raise SystemExit(
+                f"OPEN-REGION PREFLIGHT FAILED\n{error}\n\n"
+                "Automatic convergence is disabled. Run "
+                "examples/check_open_region.py manually or remove "
+                "--no-auto-convergence."
+            ) from error
+
+        print("OPEN-REGION PREFLIGHT")
+        print(f"Certificate     : unavailable ({error})")
+        print("Action          : running automatic convergence (7 isolated solves)")
+        print("The optimization timer starts after this one-time check.\n", flush=True)
+
+        air_margin = mesh.air_margin_wavelengths
+        abc_buffer = open_region.abc_buffer_wavelengths
+        resolution = mesh.wavelength_resolution
+        source = args.output/"baseline_design.json"
+        save_design(baseline, source)
+        print(f"Baseline        : saved convergence snapshot to {source.resolve()}")
+        command = (
+            sys.executable,
+            "-u",
+            str(Path(__file__).with_name("check_open_region.py").resolve()),
+            str(source.resolve()),
+            "--output",
+            str(args.convergence_report.resolve()),
+            "--air-margins",
+            _number_list(0.8*air_margin, air_margin, 1.4*air_margin),
+            "--abc-buffers",
+            _number_list(0.75*abc_buffer, abc_buffer, 1.25*abc_buffer),
+            "--mesh-resolutions",
+            _number_list(1.5*resolution, resolution, 0.75*resolution),
+            "--selected-air-margin",
+            f"{air_margin:.12g}",
+            "--selected-abc-buffer",
+            f"{abc_buffer:.12g}",
+            "--selected-resolution",
+            f"{resolution:.12g}",
+            "--solver",
+            args.solver,
+        )
+        completed = subprocess.run(command, check=False)
+        if completed.returncode != 0:
+            raise SystemExit(
+                "AUTOMATIC OPEN-REGION CONVERGENCE FAILED\n"
+                f"See {args.convergence_report.resolve()} for the failed checks."
+            )
+
+        try:
+            return validate_convergence_certificate(
+                args.convergence_report,
+                baseline,
+                mesh,
+                open_region,
+                FREQUENCY,
+            )
+        except RuntimeError as validation_error:
+            raise SystemExit(
+                "AUTOMATIC OPEN-REGION CONVERGENCE PRODUCED AN INVALID REPORT\n"
+                f"{validation_error}"
+            ) from validation_error
+
+
 def run_campaign(args: argparse.Namespace) -> None:
     baseline = design_for_coil_count(load_baseline(args.warm_start), args.coil_count)
     mesh = replace(
@@ -504,20 +595,12 @@ def run_campaign(args: argparse.Namespace) -> None:
     )
     certificate = None
     if not args.skip_convergence_check:
-        try:
-            certificate = validate_convergence_certificate(
-                args.convergence_report,
-                baseline,
-                mesh,
-                open_region,
-                FREQUENCY,
-            )
-        except RuntimeError as error:
-            raise SystemExit(
-                f"OPEN-REGION PREFLIGHT FAILED\n{error}\n\n"
-                "Run examples/check_open_region.py for this warm start and "
-                "configuration, or use --skip-convergence-check explicitly."
-            ) from error
+        certificate = ensure_convergence_certificate(
+            args,
+            baseline,
+            mesh,
+            open_region,
+        )
     simulation_metadata = {
         "mesh": asdict(mesh),
         "open_region": asdict(open_region),
