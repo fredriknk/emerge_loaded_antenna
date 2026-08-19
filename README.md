@@ -174,7 +174,8 @@ search bounds and default maximum-height penalty scale the same way. This is
 only an initial point for differential evolution, not a required pre-optimized
 antenna. Supply any current-schema design or campaign result with
 `--warm-start`; its physical dimensions, coil count and turn counts are used
-as written unless `--coil-count` or `--turn-cases` explicitly overrides them.
+as written unless explicitly overridden by `--coil-count`, `--coil-counts`, or
+`--turn-cases`.
 
 Before the optimization timer starts, the script checks a frequency-specific
 certificate such as
@@ -238,9 +239,36 @@ straight radiator:
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --coil-count 0
 ```
 
+To compare coil counts automatically in one campaign, pass a comma-separated
+list. Each count starts with one turn per coil, so this searches `none`, `1`,
+`1x1`, and `1x1x1` with the same objective and one shared leaderboard:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --hours 12 `
+    --coil-counts 0,1,2,3
+```
+
+The time estimate is divided across every topology and seed. Lower-dimensional
+topologies receive more generations so that each run gets approximately the
+same number of expensive antenna evaluations. The CSV contains the union of
+all topology parameters; inapplicable coil columns are left blank. The global
+`campaign_best.json` records both `coil_count` and `turn_case`. Each topology
+also gets an interruption-safe `turns_*_best.json` checkpoint, and
+`topology_leaderboard.json` ranks their best results under the shared
+objective.
+
 Coil turns are discontinuous geometry choices and are therefore separate
-searches rather than rounded continuous variables. To divide a two-coil
-campaign over selected cases:
+searches rather than rounded continuous variables. Mixed coil counts and turn
+counts can be selected directly in one list:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --hours 12 `
+    --turn-cases none,1,1x1,1x2,2x1,1x1x1
+```
+
+To constrain all cases to two coils, the existing spelling remains available:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
@@ -249,9 +277,12 @@ campaign over selected cases:
     --turn-cases 1x1,1x2,2x1,2x2,3x3
 ```
 
-The number of entries in each turn case must match `--coil-count`. For example,
-three coils use a case such as `--coil-count 3 --turn-cases 1x1x1,1x2x1`.
-`--turn-cases none` is an alternative spelling for a zero-coil case.
+When `--coil-count` is present, every turn case must contain that number of
+entries. For example, three coils use
+`--coil-count 3 --turn-cases 1x1x1,1x2x1`. `none` is the zero-coil case.
+`--coil-counts` generates its own one-turn cases and therefore cannot be
+combined with `--turn-cases`; use the mixed list form when explicit turns are
+needed.
 
 For best convergence, first run a full campaign for `1x1`, then give promising
 turn cases their own campaign. `--pattern directional --target-theta ...

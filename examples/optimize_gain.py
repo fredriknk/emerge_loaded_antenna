@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 import json
 import os
@@ -66,6 +66,19 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     if not result:
         raise argparse.ArgumentTypeError("provide at least one integer")
     return result
+
+
+def parse_coil_counts(value: str) -> tuple[int, ...]:
+    """Parse unique non-negative coil counts while preserving CLI order."""
+    try:
+        counts = parse_int_list(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "coil counts must be comma-separated non-negative integers"
+        ) from error
+    if any(count < 0 for count in counts):
+        raise argparse.ArgumentTypeError("coil counts must be non-negative")
+    return tuple(dict.fromkeys(counts))
 
 
 def parse_turn_cases(value: str) -> tuple[tuple[int, ...], ...]:
@@ -287,6 +300,8 @@ class CampaignProgress:
         self.best_space: DesignSpace | None = None
         self.best_turn_case: tuple[int, ...] = ()
         self.best_seed = 0
+        self.topology_records: dict[tuple[int, ...], EvaluationRecord] = {}
+        self.topology_payloads: dict[tuple[int, ...], dict] = {}
         self.last_reported_best: EvaluationRecord | None = None
         self.frequency_hz = frequency_hz
         self.simulation_metadata = simulation_metadata
@@ -300,6 +315,7 @@ class CampaignProgress:
         fields = [
             "evaluation",
             "elapsed_seconds",
+            "coil_count",
             "turn_case",
             "seed",
             "score",
@@ -332,25 +348,45 @@ class CampaignProgress:
         elapsed = time.perf_counter() - self.started
         if record.error is not None:
             self.failures += 1
-        elif self.best is None or record.score < self.best.score:
-            self.best = record
-            self.best_space = self.space
-            self.best_turn_case = self.turn_case
-            self.best_seed = self.seed
-            payload = result_payload(
-                record,
-                self.space,
-                self.turn_case,
-                self.seed,
-                self.count,
-                self.frequency_hz,
-                self.simulation_metadata,
-            )
-            write_json(self.output/"campaign_best.json", payload)
+        else:
+            topology_best = self.topology_records.get(self.turn_case)
+            if topology_best is None or record.score < topology_best.score:
+                self.topology_records[self.turn_case] = record
+                topology_payload = result_payload(
+                    record,
+                    self.space,
+                    self.turn_case,
+                    self.seed,
+                    self.count,
+                    self.frequency_hz,
+                    self.simulation_metadata,
+                )
+                self.topology_payloads[self.turn_case] = topology_payload
+                topology_name = format_turn_case(self.turn_case)
+                write_json(
+                    self.output/f"turns_{topology_name}_best.json",
+                    topology_payload,
+                )
+            if self.best is None or record.score < self.best.score:
+                self.best = record
+                self.best_space = self.space
+                self.best_turn_case = self.turn_case
+                self.best_seed = self.seed
+                payload = result_payload(
+                    record,
+                    self.space,
+                    self.turn_case,
+                    self.seed,
+                    self.count,
+                    self.frequency_hz,
+                    self.simulation_metadata,
+                )
+                write_json(self.output/"campaign_best.json", payload)
 
         row = {
             "evaluation": self.count,
             "elapsed_seconds": f"{elapsed:.3f}",
+            "coil_count": len(self.turn_case),
             "turn_case": format_turn_case(self.turn_case),
             "seed": self.seed,
             "score": record.score,
@@ -401,8 +437,18 @@ class CampaignProgress:
             )
             self.last_reported_best = self.best
 
+    def topology_leaderboard(self) -> list[dict]:
+        return sorted(
+            self.topology_payloads.values(),
+            key=lambda payload: payload["objective"],
+        )
+
     def close(self) -> None:
         self.file.close()
+        write_json(
+            self.output/"topology_leaderboard.json",
+            {"topologies": self.topology_leaderboard()},
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -436,17 +482,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seconds-per-eval", type=float, default=8.0)
     parser.add_argument("--popsize", type=int, default=8)
     parser.add_argument("--seeds", type=parse_int_list, default=(2, 3, 4, 5))
-    parser.add_argument(
+    topology = parser.add_mutually_exclusive_group()
+    topology.add_argument(
         "--coil-count",
         type=int,
         help="number of loading coils; otherwise inferred from the start design",
+    )
+    topology.add_argument(
+        "--coil-counts",
+        type=parse_coil_counts,
+        help=(
+            "compare several coil counts in one campaign, for example 0,1,2,3; "
+            "each generated topology starts with one turn per coil"
+        ),
     )
     parser.add_argument(
         "--turn-cases",
         type=parse_turn_cases,
         help=(
-            "separate discrete searches; use none for zero coils, 1 for one "
-            "coil, or forms such as 1x2 and 1x2x1"
+            "comma-separated discrete topologies, which may mix counts; use "
+            "none for zero coils, 1 for one coil, or forms such as 1x2x1"
         ),
     )
     parser.add_argument("--report-every", type=int, default=10)
@@ -553,18 +608,23 @@ def parse_args() -> argparse.Namespace:
         parser.error("open-region and mesh values must be finite and positive")
     if args.coil_count is not None and args.coil_count < 0:
         parser.error("--coil-count must be non-negative")
-    if args.turn_cases is None:
+    if args.coil_counts is not None and args.turn_cases is not None:
+        parser.error(
+            "--coil-counts and --turn-cases conflict; list mixed topologies "
+            "directly with --turn-cases"
+        )
+    if args.coil_counts is not None:
+        args.turn_cases = tuple((1,)*count for count in args.coil_counts)
+    elif args.turn_cases is None:
         if args.coil_count is not None:
             args.turn_cases = ((1,)*args.coil_count,)
+    elif args.coil_count is not None:
+        if any(len(turn_case) != args.coil_count for turn_case in args.turn_cases):
+            parser.error("every --turn-cases entry must match --coil-count")
     else:
         case_counts = {len(turn_case) for turn_case in args.turn_cases}
-        if len(case_counts) != 1:
-            parser.error("all --turn-cases must use the same number of coils")
-        parsed_count = next(iter(case_counts))
-        if args.coil_count is None:
-            args.coil_count = parsed_count
-        elif args.coil_count != parsed_count:
-            parser.error("--turn-cases do not match --coil-count")
+        if len(case_counts) == 1:
+            args.coil_count = next(iter(case_counts))
     weights = (
         args.mismatch_weight,
         args.null_weight,
@@ -609,11 +669,25 @@ def resolve_topology(
     args: argparse.Namespace,
     initial: AntennaDesign,
 ) -> None:
-    """Infer unspecified coil and turn topology from the starting design."""
-    if args.coil_count is None:
-        args.coil_count = initial.coil_count
-    if args.turn_cases is None:
-        args.turn_cases = (tuple(coil.turns for coil in initial.coils),)
+    """Resolve all requested discrete topologies, including mixed counts."""
+    coil_count = getattr(args, "coil_count", None)
+    coil_counts = getattr(args, "coil_counts", None)
+    turn_cases = getattr(args, "turn_cases", None)
+    if turn_cases is None:
+        if coil_counts is not None:
+            turn_cases = tuple((1,)*count for count in coil_counts)
+        elif coil_count is not None:
+            turn_cases = ((1,)*coil_count,)
+        else:
+            turn_cases = (tuple(coil.turns for coil in initial.coils),)
+
+    args.turn_cases = tuple(dict.fromkeys(turn_cases))
+    args.coil_counts = tuple(
+        dict.fromkeys(len(turn_case) for turn_case in args.turn_cases)
+    )
+    args.coil_count = (
+        args.coil_counts[0] if len(args.coil_counts) == 1 else None
+    )
 
 
 def iterations_per_run(
@@ -624,9 +698,46 @@ def iterations_per_run(
     if args.maxiter is not None:
         return args.maxiter
     evaluations = args.hours*3600/args.seconds_per_eval/run_count
-    population = args.popsize*variables
+    population = max(5, args.popsize*variables)
     generations = max(1, int(evaluations/population))
     return max(0, generations - 1)
+
+
+@dataclass(frozen=True)
+class CaseSchedule:
+    """One fixed-dimensional differential-evolution topology search."""
+
+    turn_case: tuple[int, ...]
+    space: DesignSpace
+    maxiter: int
+    population: int
+    evaluations_per_run: int
+
+
+def build_case_schedules(
+    args: argparse.Namespace,
+    initial: AntennaDesign,
+    frequency_hz: float,
+) -> tuple[CaseSchedule, ...]:
+    """Build fixed-dimensional searches and allocate any wall-time budget."""
+    run_count = len(args.seeds)*len(args.turn_cases)
+    schedules = []
+    for turn_case in args.turn_cases:
+        design = design_for_turn_case(initial, turn_case, frequency_hz)
+        space = make_space(design, frequency_hz)
+        variable_count = len(space.variables)
+        maxiter = iterations_per_run(args, variable_count, run_count)
+        population = max(5, args.popsize*variable_count)
+        schedules.append(
+            CaseSchedule(
+                turn_case=turn_case,
+                space=space,
+                maxiter=maxiter,
+                population=population,
+                evaluations_per_run=population*(maxiter + 1),
+            )
+        )
+    return tuple(schedules)
 
 
 def _number_list(*values: float) -> str:
@@ -763,7 +874,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     frequency_hz = args.frequency_hz
     initial = load_baseline(args.warm_start, frequency_hz)
     resolve_topology(args, initial)
-    baseline = design_for_coil_count(initial, args.coil_count, frequency_hz)
+    schedules = build_case_schedules(args, initial, frequency_hz)
     convergence_benchmark = load_reference_design(frequency_hz)
     mesh = replace(
         MeshSettings(),
@@ -792,6 +903,8 @@ def run_campaign(args: argparse.Namespace) -> None:
         "target_frequency_hz": frequency_hz,
         "match_bandwidth_hz": args.match_bandwidth_mhz*1e6,
         "farfield_angular_step_deg": args.angular_step,
+        "coil_counts": list(args.coil_counts),
+        "turn_cases": [list(turn_case) for turn_case in args.turn_cases],
         "convergence_status": (
             "skipped"
             if args.skip_convergence_check
@@ -804,18 +917,21 @@ def run_campaign(args: argparse.Namespace) -> None:
             else str(args.convergence_report.resolve())
         ),
     }
-    run_count = len(args.seeds)*len(args.turn_cases)
-    baseline_space = make_space(baseline, frequency_hz)
-    variable_count = len(baseline_space.variables)
-    maxiter = iterations_per_run(args, variable_count, run_count)
-    population = args.popsize*variable_count
-    evaluations_per_run = population*(maxiter + 1)
-    total = evaluations_per_run*run_count
+    variable_names = tuple(
+        dict.fromkeys(
+            name
+            for schedule in schedules
+            for name in schedule.space.names
+        )
+    )
+    total = len(args.seeds)*sum(
+        schedule.evaluations_per_run for schedule in schedules
+    )
     progress = CampaignProgress(
         args.output,
         total,
         args.report_every,
-        baseline_space.names,
+        variable_names,
         frequency_hz,
         simulation_metadata,
     )
@@ -837,7 +953,10 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Physical limit  : {args.maximum_height_mm:.1f} mm maximum height "
         "before penalty"
     )
-    print(f"Loading coils   : {args.coil_count}")
+    print(
+        "Coil counts     : "
+        + ", ".join(str(count) for count in args.coil_counts)
+    )
     print(f"Linear solver   : {args.solver}")
     print(
         f"Open region     : inner Huygens box at "
@@ -854,28 +973,30 @@ def run_campaign(args: argparse.Namespace) -> None:
         )
     else:
         print(f"Preflight       : PASS ({args.convergence_report.resolve()})")
-    print(f"Variables       : {variable_count} continuous")
     print(
         "Turn cases      : "
         + ", ".join(format_turn_case(case) for case in args.turn_cases)
     )
     print(f"Seeds           : {args.seeds}")
-    print(f"Population/run  : {population}")
-    print(f"Iterations/run  : {maxiter}")
+    print("Search schedule :")
+    for schedule in schedules:
+        print(
+            f"  {format_turn_case(schedule.turn_case):>8} : "
+            f"{len(schedule.space.variables):2d} variables | "
+            f"population {schedule.population:3d} | "
+            f"iterations {schedule.maxiter:4d} | "
+            f"{schedule.evaluations_per_run:5d} solves/seed"
+        )
     print(f"Planned solves  : {total}")
     print(f"Campaign log    : {(args.output/'evaluations.csv').resolve()}")
-    print("Current best is checkpointed after every improvement.")
+    print("Global and per-topology bests are checkpointed after every improvement.")
     print("Press Ctrl+C to stop safely; completed evaluations remain on disk.\n")
 
     try:
-        for turn_case in args.turn_cases:
-            case_design = design_for_turn_case(
-                baseline,
-                turn_case,
-                frequency_hz,
-            )
-            space = make_space(case_design, frequency_hz)
-            for seed in args.seeds:
+        for seed in args.seeds:
+            for schedule in schedules:
+                turn_case = schedule.turn_case
+                space = schedule.space
                 run_name = f"turns_{format_turn_case(turn_case)}_seed_{seed}"
                 print(f"\nStarting {run_name}", flush=True)
                 progress.set_context(space, turn_case, seed)
@@ -917,7 +1038,7 @@ def run_campaign(args: argparse.Namespace) -> None:
                 result = differential_evolution(
                     objective,
                     bounds=space.bounds,
-                    maxiter=maxiter,
+                    maxiter=schedule.maxiter,
                     popsize=args.popsize,
                     polish=args.polish,
                     seed=seed,
@@ -954,12 +1075,36 @@ def run_campaign(args: argparse.Namespace) -> None:
     if run_summaries:
         run_summaries.sort(key=lambda item: item["objective"])
         write_json(args.output/"run_summaries.json", {"runs": run_summaries})
+    leaderboard = progress.topology_leaderboard()
+    if leaderboard:
+        print("\nTOPOLOGY LEADERBOARD")
+        for rank, summary in enumerate(leaderboard, start=1):
+            turn_case = tuple(summary["turn_case"])
+            metrics = summary.get("metrics", {})
+            print(
+                f"{rank:2d}. {format_turn_case(turn_case):>8} | "
+                f"objective {summary['objective']:7.3f} | "
+                f"S11 {metrics.get('worst_s11_db', float('nan')):6.2f} dB | "
+                f"H10 "
+                f"{metrics.get('horizon_p10_gain_dbi', float('nan')):5.2f} dBi | "
+                f"peak {summary['peak_gain_dbi']:5.2f} dBi | "
+                f"seed {summary['seed']}"
+            )
+        print(
+            "Leaderboard     : "
+            f"{(args.output/'topology_leaderboard.json').resolve()}"
+        )
     best_path = args.output/"campaign_best.json"
     if best_path.exists():
         best = json.loads(best_path.read_text(encoding="utf-8"))
         metrics = best.get("metrics", {})
+        turn_case = tuple(best.get("turn_case", ()))
         print("\nCAMPAIGN BEST")
         print(f"Objective       : {best['objective']:.4f}")
+        print(
+            f"Topology        : {best.get('coil_count', len(turn_case))} coils, "
+            f"turns {format_turn_case(turn_case)}"
+        )
         print(f"Worst-band S11  : {metrics.get('worst_s11_db', float('nan')):.3f} dB")
         print(f"Horizon P10     : {metrics.get('horizon_p10_gain_dbi', float('nan')):.3f} dBi")
         print(f"Horizon minimum : {metrics.get('horizon_min_gain_dbi', float('nan')):.3f} dBi")

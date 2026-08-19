@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from argparse import Namespace
+from argparse import ArgumentTypeError, Namespace
+import csv
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,14 +20,17 @@ from emerge_loaded_antenna import (
 )
 from examples.optimize_gain import (
     CampaignProgress,
+    build_case_schedules,
     design_for_coil_count,
     ensure_convergence_certificate,
     iterations_per_run,
     load_baseline,
     make_space,
     parse_args,
+    parse_coil_counts,
     parse_turn_cases,
     resolve_topology,
+    run_campaign,
 )
 
 
@@ -37,6 +41,7 @@ class CampaignTests(unittest.TestCase):
 
         self.assertIsNone(args.warm_start)
         self.assertIsNone(args.coil_count)
+        self.assertIsNone(args.coil_counts)
         self.assertIsNone(args.turn_cases)
         self.assertEqual(
             load_baseline(None, args.frequency_hz),
@@ -94,6 +99,15 @@ class CampaignTests(unittest.TestCase):
         )
         self.assertEqual(parse_turn_cases("none"), ((),))
         self.assertEqual(parse_turn_cases("1x2x3"), ((1, 2, 3),))
+        self.assertEqual(
+            parse_turn_cases("none,1,1x1,1x1x1"),
+            ((), (1,), (1, 1), (1, 1, 1)),
+        )
+
+    def test_coil_counts_are_non_negative_unique_and_ordered(self):
+        self.assertEqual(parse_coil_counts("3,0,1,3"), (3, 0, 1))
+        with self.assertRaisesRegex(ArgumentTypeError, "non-negative"):
+            parse_coil_counts("0,-1")
 
     def test_design_can_be_resized_to_any_coil_count(self):
         base = AntennaDesign()
@@ -129,11 +143,12 @@ class CampaignTests(unittest.TestCase):
                 CoilDesign(turns=3),
             ),
         )
-        args = Namespace(coil_count=None, turn_cases=None)
+        args = Namespace(coil_count=None, coil_counts=None, turn_cases=None)
 
         resolve_topology(args, custom)
 
         self.assertEqual(args.coil_count, 3)
+        self.assertEqual(args.coil_counts, (3,))
         self.assertEqual(args.turn_cases, ((1, 2, 3),))
 
     def test_cli_accepts_zero_and_arbitrary_coil_counts(self):
@@ -156,6 +171,147 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(zero.turn_cases, ((),))
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
         self.assertEqual(three.solver, "cudss")
+
+    def test_cli_builds_multi_coil_topology_campaign(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--coil-counts", "0,1,2,3"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.coil_counts, (0, 1, 2, 3))
+        self.assertEqual(
+            args.turn_cases,
+            ((), (1,), (1, 1), (1, 1, 1)),
+        )
+        resolve_topology(args, AntennaDesign())
+        self.assertIsNone(args.coil_count)
+
+    def test_cli_accepts_explicit_mixed_topologies(self):
+        with patch(
+            "sys.argv",
+            [
+                "optimize_gain.py",
+                "--turn-cases",
+                "none,1,1x1,1x2,1x1x1",
+            ],
+        ):
+            args = parse_args()
+
+        resolve_topology(args, AntennaDesign())
+        self.assertEqual(args.coil_counts, (0, 1, 2, 3))
+        self.assertEqual(
+            args.turn_cases,
+            ((), (1,), (1, 1), (1, 2), (1, 1, 1)),
+        )
+
+    def test_coil_counts_and_explicit_turn_cases_conflict(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--coil-counts",
+                    "0,1,3",
+                    "--turn-cases",
+                    "none,1,1x1x1",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
+    def test_mixed_topologies_receive_equal_estimated_time(self):
+        args = Namespace(
+            seeds=(2, 3),
+            turn_cases=((), (1,), (1, 1, 1)),
+            maxiter=None,
+            hours=1.0,
+            seconds_per_eval=3.0,
+            popsize=8,
+        )
+
+        schedules = build_case_schedules(
+            args,
+            AntennaDesign(),
+            REFERENCE_DESIGN_FREQUENCY_HZ,
+        )
+
+        self.assertEqual(
+            [len(schedule.space.variables) for schedule in schedules],
+            [3, 6, 12],
+        )
+        self.assertEqual(
+            [schedule.population for schedule in schedules],
+            [24, 48, 96],
+        )
+        self.assertEqual(
+            [schedule.evaluations_per_run for schedule in schedules],
+            [192, 192, 192],
+        )
+
+    def test_campaign_executes_and_ranks_every_requested_coil_count(self):
+        class FakeObjective:
+            def __init__(self, space, *, on_evaluation, **_kwargs):
+                coil_count = space.base.coil_count
+                record = EvaluationRecord(
+                    tuple(space.initial_vector),
+                    -float(coil_count),
+                    -12.0,
+                    2.0 + coil_count,
+                    metrics={
+                        "worst_s11_db": -11.0,
+                        "horizon_p10_gain_dbi": 1.0 + coil_count,
+                        "horizon_min_gain_dbi": 0.5 + coil_count,
+                    },
+                )
+                self.best_record = record
+                self.history = [record]
+                on_evaluation(record)
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)/"campaign"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--coil-counts",
+                    "0,1,3",
+                    "--seeds",
+                    "2",
+                    "--maxiter",
+                    "0",
+                    "--skip-convergence-check",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+            with (
+                patch(
+                    "examples.optimize_gain.RobustGainObjective",
+                    FakeObjective,
+                ),
+                patch(
+                    "examples.optimize_gain.differential_evolution",
+                    return_value=SimpleNamespace(success=True, message="fake"),
+                ) as optimize,
+            ):
+                run_campaign(args)
+
+            leaderboard = json.loads(
+                (output/"topology_leaderboard.json").read_text(encoding="utf-8")
+            )["topologies"]
+            best = json.loads(
+                (output/"campaign_best.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(optimize.call_count, 3)
+            self.assertEqual(
+                [item["coil_count"] for item in leaderboard],
+                [3, 1, 0],
+            )
+            self.assertEqual(best["coil_count"], 3)
 
     def test_strict_and_skipped_convergence_flags_conflict(self):
         with (
@@ -439,6 +595,59 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(payload["coil_count"], 0)
             self.assertEqual(payload["turn_case"], [])
             self.assertIn("none", rows[1])
+
+    def test_progress_csv_supports_different_topology_dimensions(self):
+        zero = make_space(design_for_coil_count(AntennaDesign(), 0))
+        three = make_space(design_for_coil_count(AntennaDesign(), 3))
+        variable_names = tuple(dict.fromkeys((*zero.names, *three.names)))
+        records = (
+            EvaluationRecord(
+                tuple(zero.initial_vector),
+                -1.0,
+                -11.0,
+                2.0,
+                metrics={"worst_s11_db": -10.0},
+            ),
+            EvaluationRecord(
+                tuple(three.initial_vector),
+                -2.0,
+                -12.0,
+                3.0,
+                metrics={"worst_s11_db": -11.0},
+            ),
+        )
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            progress = CampaignProgress(
+                output,
+                total=2,
+                report_every=10,
+                variable_names=variable_names,
+                frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+            )
+            progress.set_context(zero, (), seed=2)
+            progress(records[0])
+            progress.set_context(three, (1, 1, 1), seed=2)
+            progress(records[1])
+            progress.close()
+
+            with (output/"evaluations.csv").open(newline="", encoding="utf-8") as file:
+                rows = list(csv.DictReader(file))
+            payload = json.loads(
+                (output/"campaign_best.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(rows[0]["coils.2.pitch"], "")
+            self.assertNotEqual(rows[1]["coils.2.pitch"], "")
+            self.assertEqual(rows[0]["coil_count"], "0")
+            self.assertEqual(rows[1]["coil_count"], "3")
+            self.assertEqual(payload["coil_count"], 3)
+            leaderboard = json.loads(
+                (output/"topology_leaderboard.json").read_text(encoding="utf-8")
+            )["topologies"]
+            self.assertEqual([item["coil_count"] for item in leaderboard], [3, 0])
+            self.assertTrue((output/"turns_none_best.json").is_file())
+            self.assertTrue((output/"turns_1x1x1_best.json").is_file())
 
 
 if __name__ == "__main__":
