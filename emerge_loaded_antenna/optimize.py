@@ -15,7 +15,8 @@ from .simulation import simulate
 class DesignVariable:
     """One bounded field in an :class:`AntennaDesign`.
 
-    Nested dataclass fields use dotted paths, e.g. ``"coil1.pitch"``.
+    Nested fields and tuple indexes use dotted paths, e.g.
+    ``"coils.0.pitch"`` and ``"straight_lengths.1"``.
     """
 
     path: str
@@ -38,8 +39,38 @@ class DesignVariable:
         return int(round(value)) if self.kind == "int" else value
 
 
+def _tuple_index(instance: tuple, part: str) -> int:
+    try:
+        index = int(part)
+    except ValueError as error:
+        raise ValueError(f"tuple optimizer field {part!r} is not an index") from error
+    if index < 0 or index >= len(instance):
+        raise ValueError(f"tuple optimizer index {index} is out of range")
+    return index
+
+
+def _get_nested(instance, path: Sequence[str]):
+    head, *tail = path
+    if isinstance(instance, tuple):
+        current = instance[_tuple_index(instance, head)]
+    else:
+        if not hasattr(instance, head):
+            raise ValueError(
+                f"{type(instance).__name__} has no optimizer field {head!r}"
+            )
+        current = getattr(instance, head)
+    return _get_nested(current, tail) if tail else current
+
+
 def _replace_nested(instance, path: Sequence[str], value):
     head, *tail = path
+    if isinstance(instance, tuple):
+        index = _tuple_index(instance, head)
+        items = list(instance)
+        items[index] = (
+            _replace_nested(items[index], tail, value) if tail else value
+        )
+        return tuple(items)
     if not hasattr(instance, head):
         raise ValueError(
             f"{type(instance).__name__} has no optimizer field {head!r}"
@@ -86,13 +117,7 @@ class DesignSpace:
     def initial_vector(self) -> np.ndarray:
         values = []
         for variable in self.variables:
-            current = self.base
-            for part in variable.path.split("."):
-                if not hasattr(current, part):
-                    raise ValueError(
-                        f"invalid design variable path {variable.path!r}"
-                    )
-                current = getattr(current, part)
+            current = _get_nested(self.base, variable.path.split("."))
             values.append(float(current))
         return np.asarray(values, dtype=float)
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "emerge-loaded-antenna"
 version = "0.2.0"
-description = "Parameterized EMerge model for a two-coil loaded antenna"
+description = "Parameterized EMerge model for variable-coil loaded antennas"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -9,6 +9,7 @@ import numpy as np
 
 from emerge_loaded_antenna import (
     AntennaDesign,
+    CoilDesign,
     DesignSpace,
     DesignVariable,
     EvaluationRecord,
@@ -35,28 +36,52 @@ class DesignTests(unittest.TestCase):
         self.assertTrue(np.isclose(y[-1], 0.0))
         self.assertGreater(z[-1], z[0])
 
+    def test_zero_coil_centerline_is_one_straight_section(self):
+        design = AntennaDesign(straight_lengths=(86e-3,), coils=())
+        path = build_centerline(design)
+        x, y, z = path.arrays()
+
+        self.assertEqual(design.coil_count, 0)
+        self.assertEqual(len(path.segments), 1)
+        self.assertEqual(path.segments[0][0], "line")
+        self.assertTrue(np.allclose((x[-1], y[-1]), (0.0, 0.0)))
+        self.assertAlmostEqual(z[-1] - z[0], 86e-3)
+
+    def test_three_coil_centerline_returns_to_axis(self):
+        design = AntennaDesign(
+            straight_lengths=(60e-3, 70e-3, 80e-3, 90e-3),
+            coils=(CoilDesign(), CoilDesign(), CoilDesign()),
+        )
+        path = build_centerline(design)
+        x, y, _ = path.arrays()
+
+        self.assertEqual(design.coil_count, 3)
+        self.assertEqual(sum(kind == "line" for kind, _ in path.segments), 4)
+        self.assertTrue(np.isclose(x[-1], 0.0))
+        self.assertTrue(np.isclose(y[-1], 0.0))
+
     def test_nested_design_space_mapping(self):
         base = AntennaDesign()
         space = DesignSpace(
             base,
             (
-                DesignVariable("bottom_length", 100e-3, 180e-3),
-                DesignVariable("coil1.pitch", 4e-3, 10e-3),
-                DesignVariable("coil1.turns", 1, 4, kind="int"),
+                DesignVariable("straight_lengths.0", 100e-3, 180e-3),
+                DesignVariable("coils.0.pitch", 4e-3, 10e-3),
+                DesignVariable("coils.0.turns", 1, 4, kind="int"),
             ),
         )
         design = space.decode((150e-3, 8e-3, 2.4))
 
-        self.assertAlmostEqual(design.bottom_length, 150e-3)
-        self.assertAlmostEqual(design.coil1.pitch, 8e-3)
-        self.assertEqual(design.coil1.turns, 2)
-        self.assertEqual(space.names[1], "coil1.pitch")
+        self.assertAlmostEqual(design.straight_lengths[0], 150e-3)
+        self.assertAlmostEqual(design.coils[0].pitch, 8e-3)
+        self.assertEqual(design.coils[0].turns, 2)
+        self.assertEqual(space.names[1], "coils.0.pitch")
         self.assertEqual(space.bounds[2], (1, 4))
 
     def test_normalized_vector_round_trip(self):
         space = DesignSpace(
             AntennaDesign(),
-            (DesignVariable("middle_length", 180e-3, 260e-3),),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
         )
         vector = np.array((220e-3,))
         np.testing.assert_allclose(
@@ -84,16 +109,66 @@ class DesignTests(unittest.TestCase):
     def test_design_json_mapping_round_trip(self):
         original = replace(
             AntennaDesign(),
-            coil1=replace(AntennaDesign().coil1, turns=2, radius=12e-3),
+            coils=(
+                replace(AntennaDesign().coils[0], turns=2, radius=12e-3),
+                AntennaDesign().coils[1],
+            ),
         )
         restored = design_from_dict(asdict(original))
 
         self.assertEqual(restored, original)
 
+    def test_legacy_two_coil_json_mapping_is_supported(self):
+        coil = asdict(CoilDesign())
+        restored = design_from_dict(
+            {
+                "bottom_length": 0.10,
+                "coil1": coil,
+                "middle_length": 0.20,
+                "coil2": coil,
+                "top_length": 0.30,
+            }
+        )
+
+        self.assertEqual(restored.straight_lengths, (0.10, 0.20, 0.30))
+        self.assertEqual(restored.coil_count, 2)
+
+    def test_legacy_python_fields_remain_usable(self):
+        original = AntennaDesign(
+            bottom_length=0.10,
+            middle_length=0.20,
+            top_length=0.30,
+            coil1=replace(CoilDesign(), turns=2),
+        )
+        changed = replace(
+            original,
+            middle_length=0.25,
+            coil2=replace(original.coil2, pitch=8e-3),
+        )
+        space = DesignSpace(
+            changed,
+            (DesignVariable("coil1.pitch", 4e-3, 10e-3),),
+        )
+        decoded = space.decode((9e-3,))
+
+        self.assertEqual(original.straight_lengths, (0.10, 0.20, 0.30))
+        self.assertEqual(original.coil1.turns, 2)
+        self.assertEqual(changed.middle_length, 0.25)
+        self.assertAlmostEqual(changed.coil2.pitch, 8e-3)
+        self.assertAlmostEqual(decoded.coils[0].pitch, 9e-3)
+
+    def test_straight_section_count_must_match_coils(self):
+        design = AntennaDesign(
+            straight_lengths=(100e-3,),
+            coils=(CoilDesign(),),
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one more"):
+            design.validate()
+
     def test_objective_reports_best_successful_record(self):
         space = DesignSpace(
             AntennaDesign(),
-            (DesignVariable("middle_length", 180e-3, 260e-3),),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
         )
         objective = GainMatchObjective(space)
         objective.history.extend(
@@ -109,7 +184,7 @@ class DesignTests(unittest.TestCase):
     def test_objective_calls_progress_callback(self):
         space = DesignSpace(
             AntennaDesign(),
-            (DesignVariable("middle_length", 180e-3, 260e-3),),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
         )
         reported = []
         objective = GainMatchObjective(space, on_evaluation=reported.append)
@@ -127,7 +202,7 @@ class DesignTests(unittest.TestCase):
     def test_robust_objective_uses_horizon_and_band_metrics(self):
         space = DesignSpace(
             AntennaDesign(),
-            (DesignVariable("middle_length", 180e-3, 260e-3),),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
         )
         pattern = SimpleNamespace(
             horizon_p10_gain_dbi=4.0,

@@ -1,8 +1,12 @@
-# Smooth Two-Coil Loaded Antenna in EMerge
+# Smooth Variable-Coil Loaded Antenna in EMerge
 
-This package generates and simulates a **smooth, continuously curved two-coil loaded antenna** directly in [EMerge](https://github.com/FennisRobert/EMerge). It provides a reusable Python API for scripts and optimizers, plus `main.py` as an interactive plotting example.
+This package generates and simulates a **smooth, continuously curved loaded
+antenna with any number of coils, including zero**, directly in
+[EMerge](https://github.com/FennisRobert/EMerge). It provides a reusable Python
+API for scripts and optimizers, plus `main.py` as an interactive plotting
+example. The default design has two coils.
 
-The antenna geometry consists of:
+The default antenna geometry consists of:
 
 ```text
         Top straight
@@ -94,7 +98,10 @@ from emerge_loaded_antenna import (
     simulate,
 )
 
-design = replace(AntennaDesign(), middle_length=225e-3)
+design = replace(
+    AntennaDesign(),
+    straight_lengths=(140e-3, 225e-3, 140e-3),
+)
 options = SimulationOptions(
     sweep=FrequencySweep.single(868e6),
     show_geometry=False,
@@ -125,10 +132,10 @@ from emerge_loaded_antenna import (
 space = DesignSpace(
     AntennaDesign(),
     (
-        DesignVariable("bottom_length", 100e-3, 180e-3),
-        DesignVariable("middle_length", 160e-3, 260e-3),
-        DesignVariable("coil1.pitch", 5e-3, 10e-3),
-        DesignVariable("coil2.pitch", 5e-3, 10e-3),
+        DesignVariable("straight_lengths.0", 100e-3, 180e-3),
+        DesignVariable("straight_lengths.1", 160e-3, 260e-3),
+        DesignVariable("coils.0.pitch", 5e-3, 10e-3),
+        DesignVariable("coils.1.pitch", 5e-3, 10e-3),
     ),
 )
 objective = S11Objective(space, target_frequency=868e6)
@@ -157,21 +164,33 @@ The wall-time conversion assumes roughly eight seconds per robust evaluation;
 override it with `--seconds-per-eval` if the live ETA on your machine settles
 substantially higher or lower.
 
-It searches straight lengths, both pitches, both coil radii, radial length and
-radial angle. S11 is constrained at 863, 868 and 873 MHz. Every run receives
+It searches every straight length, every coil pitch and radius, radial length,
+and radial angle. S11 is constrained at 863, 868 and 873 MHz. Every run receives
 the saved winner as `x0`; each candidate is flushed to CSV and every new global
 best is atomically checkpointed as `campaign_best.json`. Output goes into a
 new timestamped directory so previous campaigns are never overwritten.
 
+Choose the coil count explicitly. A zero-coil campaign optimizes a conventional
+straight radiator:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --coil-count 0
+```
+
 Coil turns are discontinuous geometry choices and are therefore separate
-searches rather than rounded continuous variables. To divide a campaign over
-selected cases:
+searches rather than rounded continuous variables. To divide a two-coil
+campaign over selected cases:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
     --hours 12 `
+    --coil-count 2 `
     --turn-cases 1x1,1x2,2x1,2x2,3x3
 ```
+
+The number of entries in each turn case must match `--coil-count`. For example,
+three coils use a case such as `--coil-count 3 --turn-cases 1x1x1,1x2x1`.
+`--turn-cases none` is an alternative spelling for a zero-coil case.
 
 For best convergence, first run a full campaign for `1x1`, then give promising
 turn cases their own campaign. `--pattern directional --target-theta ...
@@ -210,7 +229,7 @@ from emerge.plot import plot_sp, plot_ff, smith
 
 ## How the Geometry Is Constructed
 
-The antenna is generated as one continuous sequence:
+The default two-coil antenna is generated as one continuous sequence:
 
 ```text
 feed
@@ -331,27 +350,40 @@ from emerge_loaded_antenna import AntennaDesign, CoilDesign
 
 design = AntennaDesign(
     wire_radius=1.0e-3,
-    bottom_length=0.120,
-    coil1=CoilDesign(
-        radius=0.010,
-        turns=1,
-        pitch=0.007,
-        transition=0.006,
-        transition_offset=0.00475,
-        handedness="RH",
+    straight_lengths=(0.120, 0.221, 0.150),
+    coils=(
+        CoilDesign(
+            radius=0.010,
+            turns=1,
+            pitch=0.007,
+            transition=0.006,
+            transition_offset=0.00475,
+            handedness="RH",
+        ),
+        CoilDesign(
+            radius=0.010,
+            turns=1,
+            pitch=0.007,
+            transition=0.006,
+            transition_offset=0.00475,
+            handedness="RH",
+        ),
     ),
-    middle_length=0.221,
-    coil2=CoilDesign(
-        radius=0.010,
-        turns=1,
-        pitch=0.007,
-        transition=0.006,
-        transition_offset=0.00475,
-        handedness="RH",
-    ),
-    top_length=0.150,
 )
 ```
+
+The rule is simple: `N` coils require `N + 1` straight lengths. A zero-coil
+design is therefore just:
+
+```python
+design = AntennaDesign(straight_lengths=(86e-3,), coils=())
+```
+
+Add entries to both tuples to create three or more coils. `load_design()` also
+accepts the former fixed `bottom_length`/`coil1`/`middle_length`/`coil2`/
+`top_length` JSON format, so existing optimizer results remain usable. Those
+names also remain available as compatibility aliases in existing two-coil
+Python code; new code should use the tuples so it can change coil count.
 
 The coil radius is measured to the wire centerline, so its approximate outside
 diameter is `2 * (coil.radius + design.wire_radius)`. Pitch is the axial rise
@@ -368,10 +400,14 @@ Because designs are frozen and safe to reuse, change one parameter with
 ```python
 from dataclasses import replace
 
-candidate = replace(design, middle_length=0.225)
+lengths = list(design.straight_lengths)
+lengths[1] = 0.225
+coils = list(design.coils)
+coils[0] = replace(coils[0], pitch=0.0065)
 candidate = replace(
-    candidate,
-    coil1=replace(candidate.coil1, pitch=0.0065),
+    design,
+    straight_lengths=tuple(lengths),
+    coils=tuple(coils),
 )
 ```
 
@@ -516,7 +552,7 @@ This is strongly recommended while developing the antenna.
 
 You should verify that:
 
-* both coils have the expected number of turns,
+* every configured coil has the expected number of turns,
 * the straight sections are correctly aligned,
 * the transitions are smooth,
 * the conductor does not self-intersect,
@@ -648,11 +684,11 @@ from dataclasses import replace
 candidate = replace(
     design,
     wire_radius=0.5e-3,
-    bottom_length=90e-3,
-    middle_length=120e-3,
-    top_length=80e-3,
-    coil1=replace(design.coil1, radius=8e-3, turns=8, pitch=2.5e-3),
-    coil2=replace(design.coil2, radius=8e-3, turns=5, pitch=2.5e-3),
+    straight_lengths=(90e-3, 120e-3, 80e-3),
+    coils=(
+        replace(design.coils[0], radius=8e-3, turns=8, pitch=2.5e-3),
+        replace(design.coils[1], radius=8e-3, turns=5, pitch=2.5e-3),
+    ),
 )
 ```
 
@@ -664,15 +700,15 @@ The `DesignSpace` adapter exposes scalar and integer parameters using dotted
 paths, including nested coil fields such as:
 
 ```text
-bottom straight length
-coil 1 radius
-coil 1 turns
-coil 1 pitch
-middle length
-coil 2 radius
-coil 2 turns
-coil 2 pitch
-top length
+straight_lengths.0
+coils.0.radius
+coils.0.turns
+coils.0.pitch
+straight_lengths.1
+coils.1.radius
+coils.1.turns
+coils.1.pitch
+straight_lengths.2
 ```
 
 and define an objective such as:
@@ -755,7 +791,8 @@ If:
 ```python
 design = AntennaDesign(
     wire_radius=0.75e-3,
-    coil1=CoilDesign(radius=10e-3),
+    straight_lengths=(140e-3, 140e-3),
+    coils=(CoilDesign(radius=10e-3),),
 )
 ```
 

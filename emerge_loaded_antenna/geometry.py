@@ -316,9 +316,8 @@ def build_centerline(
     mesh = mesh or MeshSettings()
     mesh.validate()
     path = AntennaPath(z=design.port_height)
-    path.straight(design.bottom_length)
-    path.coil(design.coil1, mesh.preview_points_per_turn)
-    path.straight(design.middle_length)
-    path.coil(design.coil2, mesh.preview_points_per_turn)
-    path.straight(design.top_length)
+    for index, straight_length in enumerate(design.straight_lengths):
+        path.straight(straight_length)
+        if index < design.coil_count:
+            path.coil(design.coils[index], mesh.preview_points_per_turn)
     return path

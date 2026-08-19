@@ -18,6 +18,7 @@ import numpy as np
 
 from emerge_loaded_antenna import (
     AntennaDesign,
+    CoilDesign,
     DesignSpace,
     DesignVariable,
     EvaluationRecord,
@@ -60,22 +61,32 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     return result
 
 
-def parse_turn_cases(value: str) -> tuple[tuple[int, int], ...]:
+def parse_turn_cases(value: str) -> tuple[tuple[int, ...], ...]:
     cases = []
     try:
         for item in value.split(","):
-            first, second = item.lower().strip().split("x", maxsplit=1)
-            case = (int(first), int(second))
-            if min(case) < 1:
+            item = item.lower().strip()
+            if item in {"0", "none"}:
+                case = ()
+            else:
+                parts = item.split("x")
+                if not parts or any(not part for part in parts):
+                    raise ValueError
+                case = tuple(int(part) for part in parts)
+            if any(turns < 1 for turns in case):
                 raise ValueError
             cases.append(case)
     except ValueError as error:
         raise argparse.ArgumentTypeError(
-            "turn cases must look like 1x1,1x2,2x1"
+            "turn cases must look like none, 1, 1x2 or 1x2x1"
         ) from error
     if not cases:
         raise argparse.ArgumentTypeError("provide at least one turn case")
     return tuple(cases)
+
+
+def format_turn_case(turn_case: tuple[int, ...]) -> str:
+    return "x".join(str(turns) for turns in turn_case) or "none"
 
 
 def format_parameter(name: str, value: float) -> str:
@@ -93,28 +104,83 @@ def write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def design_for_coil_count(base: AntennaDesign, coil_count: int) -> AntennaDesign:
+    """Resize a warm-start design while preserving total straight length."""
+    if (
+        isinstance(coil_count, bool)
+        or int(coil_count) != coil_count
+        or coil_count < 0
+    ):
+        raise ValueError("coil_count must be a non-negative integer")
+    coil_count = int(coil_count)
+    if base.coil_count == coil_count:
+        return base
+
+    section_length = sum(base.straight_lengths)/(coil_count + 1)
+    coils = base.coils[:coil_count]
+    coils += tuple(CoilDesign() for _ in range(coil_count - len(coils)))
+    return replace(
+        base,
+        straight_lengths=(section_length,)*(coil_count + 1),
+        coils=coils,
+    )
+
+
+def design_for_turn_case(
+    base: AntennaDesign,
+    turn_case: tuple[int, ...],
+) -> AntennaDesign:
+    design = design_for_coil_count(base, len(turn_case))
+    return replace(
+        design,
+        coils=tuple(
+            replace(coil, turns=turns)
+            for coil, turns in zip(design.coils, turn_case)
+        ),
+    )
+
+
 def make_space(base: AntennaDesign) -> DesignSpace:
     """Continuous variables; coil turns are fixed by the surrounding case."""
-    return DesignSpace(
-        base,
+    if base.coil_count == 2:
+        straight_bounds = (
+            (80e-3, 200e-3),
+            (120e-3, 280e-3),
+            (80e-3, 200e-3),
+        )
+    elif base.coil_count == 0:
+        straight_bounds = ((40e-3, 600e-3),)
+    else:
+        straight_bounds = ((40e-3, 300e-3),)*len(base.straight_lengths)
+
+    variables = [
+        DesignVariable(f"straight_lengths.{index}", lower, upper)
+        for index, (lower, upper) in enumerate(straight_bounds)
+    ]
+    variables.extend(
+        DesignVariable(f"coils.{index}.pitch", 4e-3, 12e-3)
+        for index in range(base.coil_count)
+    )
+    variables.extend(
+        DesignVariable(f"coils.{index}.radius", 7e-3, 16e-3)
+        for index in range(base.coil_count)
+    )
+    variables.extend(
         (
-            DesignVariable("bottom_length", 80e-3, 200e-3),
-            DesignVariable("middle_length", 120e-3, 280e-3),
-            DesignVariable("top_length", 80e-3, 200e-3),
-            DesignVariable("coil1.pitch", 4e-3, 12e-3),
-            DesignVariable("coil2.pitch", 4e-3, 12e-3),
-            DesignVariable("coil1.radius", 7e-3, 16e-3),
-            DesignVariable("coil2.radius", 7e-3, 16e-3),
             DesignVariable("radial_length", 55e-3, 120e-3),
             DesignVariable("radial_angle_deg", 20.0, 70.0),
-        ),
+        )
+    )
+    return DesignSpace(
+        base,
+        variables,
     )
 
 
 def result_payload(
     record: EvaluationRecord,
     space: DesignSpace,
-    turn_case: tuple[int, int],
+    turn_case: tuple[int, ...],
     seed: int,
     evaluations: int,
 ) -> dict:
@@ -125,6 +191,7 @@ def result_payload(
         "s11_db": record.s11_db,
         "peak_gain_dbi": record.peak_gain_dbi,
         "metrics": dict(record.metrics),
+        "coil_count": len(turn_case),
         "turn_case": list(turn_case),
         "seed": seed,
         "evaluations_at_save": evaluations,
@@ -136,7 +203,13 @@ def result_payload(
 class CampaignProgress:
     """Persistent evaluation log and concise whole-campaign reporting."""
 
-    def __init__(self, output: Path, total: int, report_every: int):
+    def __init__(
+        self,
+        output: Path,
+        total: int,
+        report_every: int,
+        variable_names: tuple[str, ...],
+    ):
         self.output = output
         self.total = total
         self.report_every = max(1, report_every)
@@ -145,11 +218,11 @@ class CampaignProgress:
         self.failures = 0
         self.best: EvaluationRecord | None = None
         self.best_space: DesignSpace | None = None
-        self.best_turn_case = (1, 1)
+        self.best_turn_case: tuple[int, ...] = ()
         self.best_seed = 0
         self.last_reported_best: EvaluationRecord | None = None
         self.space: DesignSpace | None = None
-        self.turn_case = (1, 1)
+        self.turn_case: tuple[int, ...] = ()
         self.seed = 0
         output.mkdir(parents=True, exist_ok=True)
         self.file = (output/"evaluations.csv").open(
@@ -165,15 +238,7 @@ class CampaignProgress:
             "peak_gain_dbi",
             "error",
             *METRIC_FIELDS,
-            "bottom_length",
-            "middle_length",
-            "top_length",
-            "coil1.pitch",
-            "coil2.pitch",
-            "coil1.radius",
-            "coil2.radius",
-            "radial_length",
-            "radial_angle_deg",
+            *variable_names,
         ]
         self.writer = csv.DictWriter(
             self.file,
@@ -185,7 +250,7 @@ class CampaignProgress:
     def set_context(
         self,
         space: DesignSpace,
-        turn_case: tuple[int, int],
+        turn_case: tuple[int, ...],
         seed: int,
     ) -> None:
         self.space = space
@@ -216,7 +281,7 @@ class CampaignProgress:
         row = {
             "evaluation": self.count,
             "elapsed_seconds": f"{elapsed:.3f}",
-            "turn_case": f"{self.turn_case[0]}x{self.turn_case[1]}",
+            "turn_case": format_turn_case(self.turn_case),
             "seed": self.seed,
             "score": record.score,
             "s11_db": record.s11_db,
@@ -260,7 +325,7 @@ class CampaignProgress:
                 for name, value in zip(self.best_space.names, self.best.vector)
             )
             print(
-                f"    best case {self.best_turn_case[0]}x{self.best_turn_case[1]} "
+                f"    best case {format_turn_case(self.best_turn_case)} "
                 f"seed {self.best_seed}: {parameters}",
                 flush=True,
             )
@@ -288,10 +353,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--popsize", type=int, default=8)
     parser.add_argument("--seeds", type=parse_int_list, default=(2, 3, 4, 5))
     parser.add_argument(
+        "--coil-count",
+        type=int,
+        help="number of loading coils; defaults to two",
+    )
+    parser.add_argument(
         "--turn-cases",
         type=parse_turn_cases,
-        default=((1, 1),),
-        help="separate discrete searches, e.g. 1x1,1x2,2x1,2x2,3x3",
+        help=(
+            "separate discrete searches; use none for zero coils, 1 for one "
+            "coil, or forms such as 1x2 and 1x2x1"
+        ),
     )
     parser.add_argument("--report-every", type=int, default=10)
     parser.add_argument(
@@ -330,6 +402,20 @@ def parse_args() -> argparse.Namespace:
         parser.error("--hours must be positive")
     if args.popsize < 1 or args.seconds_per_eval <= 0:
         parser.error("--popsize and --seconds-per-eval must be positive")
+    if args.coil_count is not None and args.coil_count < 0:
+        parser.error("--coil-count must be non-negative")
+    if args.turn_cases is None:
+        args.coil_count = 2 if args.coil_count is None else args.coil_count
+        args.turn_cases = ((1,)*args.coil_count,)
+    else:
+        case_counts = {len(turn_case) for turn_case in args.turn_cases}
+        if len(case_counts) != 1:
+            parser.error("all --turn-cases must use the same number of coils")
+        parsed_count = next(iter(case_counts))
+        if args.coil_count is None:
+            args.coil_count = parsed_count
+        elif args.coil_count != parsed_count:
+            parser.error("--turn-cases do not match --coil-count")
     weights = (
         args.mismatch_weight,
         args.null_weight,
@@ -367,14 +453,20 @@ def iterations_per_run(
 
 
 def run_campaign(args: argparse.Namespace) -> None:
-    baseline = load_baseline(args.warm_start)
+    baseline = design_for_coil_count(load_baseline(args.warm_start), args.coil_count)
     run_count = len(args.seeds)*len(args.turn_cases)
-    variable_count = len(make_space(baseline).variables)
+    baseline_space = make_space(baseline)
+    variable_count = len(baseline_space.variables)
     maxiter = iterations_per_run(args, variable_count, run_count)
     population = args.popsize*variable_count
     evaluations_per_run = population*(maxiter + 1)
     total = evaluations_per_run*run_count
-    progress = CampaignProgress(args.output, total, args.report_every)
+    progress = CampaignProgress(
+        args.output,
+        total,
+        args.report_every,
+        baseline_space.names,
+    )
     run_summaries = []
 
     print("ROBUST 868 MHz ANTENNA CAMPAIGN")
@@ -388,8 +480,12 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Physical limit  : {args.maximum_height_mm:.1f} mm maximum height "
         "before penalty"
     )
+    print(f"Loading coils   : {args.coil_count}")
     print(f"Variables       : {variable_count} continuous")
-    print(f"Turn cases      : {args.turn_cases}")
+    print(
+        "Turn cases      : "
+        + ", ".join(format_turn_case(case) for case in args.turn_cases)
+    )
     print(f"Seeds           : {args.seeds}")
     print(f"Population/run  : {population}")
     print(f"Iterations/run  : {maxiter}")
@@ -400,14 +496,10 @@ def run_campaign(args: argparse.Namespace) -> None:
 
     try:
         for turn_case in args.turn_cases:
-            case_design = replace(
-                baseline,
-                coil1=replace(baseline.coil1, turns=turn_case[0]),
-                coil2=replace(baseline.coil2, turns=turn_case[1]),
-            )
+            case_design = design_for_turn_case(baseline, turn_case)
             space = make_space(case_design)
             for seed in args.seeds:
-                run_name = f"turns_{turn_case[0]}x{turn_case[1]}_seed_{seed}"
+                run_name = f"turns_{format_turn_case(turn_case)}_seed_{seed}"
                 print(f"\nStarting {run_name}", flush=True)
                 progress.set_context(space, turn_case, seed)
                 options = SimulationOptions(
