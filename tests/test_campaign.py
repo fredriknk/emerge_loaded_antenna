@@ -19,8 +19,14 @@ from emerge_loaded_antenna import (
     load_reference_design,
 )
 from examples.optimize_gain import (
+    BASE_SECTION_START_LAMBDA,
+    C0,
+    COLLINEAR_SECTION_RANGE_LAMBDA,
+    COLLINEAR_SECTION_START_LAMBDA,
     CampaignProgress,
+    MONOPOLE_LENGTH_RANGE_LAMBDA,
     build_case_schedules,
+    default_maximum_height,
     design_for_coil_count,
     ensure_convergence_certificate,
     iterations_per_run,
@@ -73,7 +79,11 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(args.frequency_hz, 434e6)
         self.assertAlmostEqual(args.match_bandwidth_mhz, 5.0)
-        self.assertAlmostEqual(args.maximum_height_mm, 1200.0)
+        self.assertIsNone(args.maximum_height_mm)
+        self.assertAlmostEqual(
+            1e3*default_maximum_height(434e6, 2),
+            1.7*C0/434e6*1e3,
+        )
         self.assertIn("434000000hz", str(args.convergence_report))
         bounds_868 = make_space(load_reference_design(868e6), 868e6).bounds
         bounds_434 = make_space(load_reference_design(434e6), 434e6).bounds
@@ -113,15 +123,85 @@ class CampaignTests(unittest.TestCase):
         base = AntennaDesign()
         zero = design_for_coil_count(base, 0)
         three = design_for_coil_count(base, 3)
+        wavelength = C0/REFERENCE_DESIGN_FREQUENCY_HZ
 
         self.assertEqual(zero.coil_count, 0)
         self.assertEqual(len(zero.straight_lengths), 1)
-        self.assertAlmostEqual(sum(zero.straight_lengths), sum(base.straight_lengths))
+        self.assertAlmostEqual(
+            zero.straight_lengths[0],
+            BASE_SECTION_START_LAMBDA*wavelength,
+        )
         self.assertEqual(three.coil_count, 3)
         self.assertEqual(len(three.straight_lengths), 4)
+        self.assertAlmostEqual(
+            three.straight_lengths[0],
+            BASE_SECTION_START_LAMBDA*wavelength,
+        )
+        for length in three.straight_lengths[1:]:
+            self.assertAlmostEqual(
+                length,
+                COLLINEAR_SECTION_START_LAMBDA*wavelength,
+            )
         self.assertEqual(len(make_space(zero).variables), 3)
         self.assertEqual(len(make_space(three).variables), 8)
         self.assertEqual(len(make_space(three, finetune=True).variables), 12)
+
+    def test_electrical_length_priors_are_broad_but_finite(self):
+        frequency_hz = REFERENCE_DESIGN_FREQUENCY_HZ
+        wavelength = C0/frequency_hz
+        zero = make_space(
+            design_for_coil_count(AntennaDesign(), 0, frequency_hz),
+            frequency_hz,
+        )
+        three = make_space(
+            design_for_coil_count(AntennaDesign(), 3, frequency_hz),
+            frequency_hz,
+        )
+        zero_bounds = dict(zip(zero.names, zero.bounds))
+        three_bounds = dict(zip(three.names, three.bounds))
+
+        self.assertEqual(
+            zero_bounds["straight_lengths.0"],
+            tuple(value*wavelength for value in MONOPOLE_LENGTH_RANGE_LAMBDA),
+        )
+        expected_loaded = tuple(
+            value*wavelength for value in COLLINEAR_SECTION_RANGE_LAMBDA
+        )
+        for index in range(4):
+            self.assertEqual(
+                three_bounds[f"straight_lengths.{index}"],
+                expected_loaded,
+            )
+
+    def test_thick_wire_expands_coil_geometry_floors(self):
+        coils = (
+            CoilDesign(pitch=8e-3, radius=12e-3),
+            CoilDesign(pitch=8e-3, radius=12e-3),
+        )
+        thin = make_space(AntennaDesign(coils=coils))
+        thick = make_space(AntennaDesign(wire_radius=2e-3, coils=coils))
+        thin_bounds = dict(zip(thin.names, thin.bounds))
+        thick_bounds = dict(zip(thick.names, thick.bounds))
+
+        self.assertGreater(
+            thick_bounds["shared_coil_pitch"][0],
+            thin_bounds["shared_coil_pitch"][0],
+        )
+        self.assertGreater(
+            thick_bounds["shared_coil_radius"][0],
+            thin_bounds["shared_coil_radius"][0],
+        )
+
+    def test_valid_warm_start_can_expand_below_preferred_wire_floor(self):
+        coils = (
+            CoilDesign(pitch=4e-3, radius=6e-3),
+            CoilDesign(pitch=4e-3, radius=6e-3),
+        )
+        space = make_space(AntennaDesign(wire_radius=2e-3, coils=coils))
+
+        for value, (lower, upper) in zip(space.initial_vector, space.bounds):
+            self.assertLessEqual(lower, value)
+            self.assertGreaterEqual(upper, value)
 
     def test_broad_space_shares_coil_pitch_and_radius(self):
         custom = AntennaDesign(
@@ -359,6 +439,22 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(
                 best["simulation"]["coil_parameterization"],
                 "shared",
+            )
+            self.assertEqual(
+                best["simulation"]["search_bounds"]["policy"],
+                "wavelength_wire_v1",
+            )
+            self.assertAlmostEqual(
+                best["simulation"]["search_bounds"][
+                    "maximum_height_wavelengths"
+                ],
+                2.2,
+            )
+            self.assertEqual(
+                best["simulation"]["search_bounds"][
+                    "maximum_height_source"
+                ],
+                "automatic",
             )
 
     def test_strict_and_skipped_convergence_flags_conflict(self):
@@ -612,6 +708,10 @@ class CampaignTests(unittest.TestCase):
             )
             self.assertEqual(payload["objective"], -3.0)
             self.assertEqual(payload["turn_case"], [1, 1])
+            self.assertEqual(
+                set(payload["search_space"]["bounds"]),
+                set(space.names),
+            )
             self.assertEqual(len((output/"evaluations.csv").read_text().splitlines()), 2)
 
     def test_zero_coil_progress_uses_none_case(self):

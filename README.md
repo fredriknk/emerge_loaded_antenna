@@ -170,12 +170,50 @@ The target is not hard-coded. For example, a fresh 915 MHz search over a
 
 With no `--warm-start`, the script synthesizes an electrically equivalent
 starting geometry by scaling every length with wavelength. The dimensional
-search bounds and default maximum-height penalty scale the same way. This is
-only an initial point for differential evolution, not a required pre-optimized
-antenna. Supply any current-schema design or campaign result with
+search bounds scale with wavelength and wire diameter. This is only an initial
+point for differential evolution, not a required pre-optimized antenna.
+Supply any current-schema design or campaign result with
 `--warm-start`; its physical dimensions, coil count and turn counts are used
 as written unless explicitly overridden by `--coil-count`, `--coil-counts`, or
 `--turn-cases`.
+
+When a topology override changes the coil count, the generated seed uses
+electrical-length priors: a zero-coil radiator starts at `0.25 lambda`; a
+loaded topology starts with `0.25 lambda` below the first coil and `0.50
+lambda` for every later straight section. These are starting guesses based on
+the conventional [quarter-wave monopole](https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2024RS008068)
+and [half-wave collinear sections](https://ntrs.nasa.gov/citations/19840019086),
+not assumed resonant lengths. Coil loading, conductor thickness, the ground
+system and end effects are left for the solver and optimizer.
+
+The broad-search intervals deliberately include quarter-wave, half-wave and
+5/8-wave candidates without admitting arbitrary multi-wavelength sections.
+Here `d` is wire diameter:
+
+| Parameter | Nominal interval | Wire/geometry safeguard |
+|---|---:|---:|
+| zero-coil radiator | `0.18-0.70 lambda` | lower bound at least `12d` |
+| each loaded straight section | `0.15-0.72 lambda` | lower bound at least `12d` |
+| radial length | `0.15-0.40 lambda` | lower bound at least `12d` |
+| coil pitch | `0.010-0.040 lambda` | lower at least `1.5d`, upper at least `6d` |
+| coil radius | `0.015-0.050 lambda` | lower at least `2.5d` plus transition clearance, upper at least `8d` |
+| radial angle | `5-75 degrees` | expands for an outside warm start |
+
+If a supplied design lies outside a heuristic interval, that individual bound
+expands around it instead of clipping it; only the coil transition's geometric
+validity remains a hard floor. Every saved result records the exact interval
+and starting value under `search_space`.
+
+The automatic soft height allowance is also topology-aware:
+
+```text
+maximum height = (0.70 + 0.50 * largest requested coil count) * lambda
+```
+
+For example, a three-coil 868 MHz campaign gets approximately `760 mm` or
+`2.20 lambda`, while the zero-coil search remains bounded to `0.70 lambda`.
+This is a penalty threshold, not a hard geometry bound, and
+`--maximum-height-mm` overrides it.
 
 Before the optimization timer starts, the script checks a frequency-specific
 certificate such as

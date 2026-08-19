@@ -56,6 +56,18 @@ METRIC_FIELDS = (
     "height_penalty",
 )
 
+C0 = 299_792_458.0
+BASE_SECTION_START_LAMBDA = 0.25
+COLLINEAR_SECTION_START_LAMBDA = 0.50
+MONOPOLE_LENGTH_RANGE_LAMBDA = (0.18, 0.70)
+COLLINEAR_SECTION_RANGE_LAMBDA = (0.15, 0.72)
+RADIAL_LENGTH_RANGE_LAMBDA = (0.15, 0.40)
+COIL_PITCH_RANGE_LAMBDA = (0.010, 0.040)
+COIL_RADIUS_RANGE_LAMBDA = (0.015, 0.050)
+MINIMUM_STRAIGHT_WIRE_DIAMETERS = 12.0
+MINIMUM_PITCH_WIRE_DIAMETERS = 1.5
+MINIMUM_RADIUS_WIRE_DIAMETERS = 2.5
+
 
 def elapsed_text(seconds: float) -> str:
     return str(timedelta(seconds=max(0, round(seconds))))
@@ -124,12 +136,37 @@ def write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def free_space_wavelength(frequency_hz: float) -> float:
+    """Return free-space wavelength after validating a frequency."""
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0:
+        raise ValueError("frequency_hz must be finite and positive")
+    return C0/frequency_hz
+
+
+def default_maximum_height(
+    frequency_hz: float,
+    maximum_coil_count: int,
+) -> float:
+    """Return the topology-aware soft height allowance in metres."""
+    if (
+        isinstance(maximum_coil_count, bool)
+        or int(maximum_coil_count) != maximum_coil_count
+        or maximum_coil_count < 0
+    ):
+        raise ValueError("maximum_coil_count must be a non-negative integer")
+    allowance_wavelengths = (
+        MONOPOLE_LENGTH_RANGE_LAMBDA[1]
+        + COLLINEAR_SECTION_START_LAMBDA*int(maximum_coil_count)
+    )
+    return allowance_wavelengths*free_space_wavelength(frequency_hz)
+
+
 def design_for_coil_count(
     base: AntennaDesign,
     coil_count: int,
     frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
 ) -> AntennaDesign:
-    """Resize a warm-start design while preserving total straight length."""
+    """Resize a design using monopole and collinear wavelength priors."""
     if (
         isinstance(coil_count, bool)
         or int(coil_count) != coil_count
@@ -140,7 +177,19 @@ def design_for_coil_count(
     if base.coil_count == coil_count:
         return base
 
-    section_length = sum(base.straight_lengths)/(coil_count + 1)
+    wavelength = free_space_wavelength(frequency_hz)
+    wire_diameter = 2*base.wire_radius
+    minimum_straight = MINIMUM_STRAIGHT_WIRE_DIAMETERS*wire_diameter
+    base_section = max(BASE_SECTION_START_LAMBDA*wavelength, minimum_straight)
+    collinear_section = max(
+        COLLINEAR_SECTION_START_LAMBDA*wavelength,
+        minimum_straight,
+    )
+    straight_lengths = (
+        (base_section,)
+        if coil_count == 0
+        else (base_section,) + (collinear_section,)*coil_count
+    )
     coils = base.coils[:coil_count]
     template = (
         base.coils[-1]
@@ -150,7 +199,7 @@ def design_for_coil_count(
     coils += tuple(template for _ in range(coil_count - len(coils)))
     return replace(
         base,
-        straight_lengths=(section_length,)*(coil_count + 1),
+        straight_lengths=straight_lengths,
         coils=coils,
     )
 
@@ -176,9 +225,8 @@ def make_space(
     finetune: bool = False,
 ) -> DesignSpace:
     """Create wavelength-scaled bounds for broad or fine topology searches."""
-    if not np.isfinite(frequency_hz) or frequency_hz <= 0:
-        raise ValueError("frequency_hz must be finite and positive")
-    scale = REFERENCE_DESIGN_FREQUENCY_HZ/frequency_hz
+    wavelength = free_space_wavelength(frequency_hz)
+    wire_diameter = 2*base.wire_radius
 
     def enclose(
         bounds: tuple[float, float],
@@ -207,18 +255,22 @@ def make_space(
             ),
         )
 
-    if base.coil_count == 2:
-        default_straight_bounds = (
-            (80e-3*scale, 200e-3*scale),
-            (120e-3*scale, 280e-3*scale),
-            (80e-3*scale, 200e-3*scale),
-        )
-    elif base.coil_count == 0:
-        default_straight_bounds = ((40e-3*scale, 600e-3*scale),)
-    else:
-        default_straight_bounds = (
-            (40e-3*scale, 300e-3*scale),
-        )*len(base.straight_lengths)
+    straight_range = (
+        MONOPOLE_LENGTH_RANGE_LAMBDA
+        if base.coil_count == 0
+        else COLLINEAR_SECTION_RANGE_LAMBDA
+    )
+    minimum_straight = max(
+        straight_range[0]*wavelength,
+        MINIMUM_STRAIGHT_WIRE_DIAMETERS*wire_diameter,
+    )
+    maximum_straight = max(
+        straight_range[1]*wavelength,
+        1.5*minimum_straight,
+    )
+    default_straight_bounds = (
+        (minimum_straight, maximum_straight),
+    )*len(base.straight_lengths)
     straight_bounds = tuple(
         enclose(bounds, value)
         for bounds, value in zip(
@@ -232,7 +284,18 @@ def make_space(
         for index, (lower, upper) in enumerate(straight_bounds)
     ]
     if base.coils and not finetune:
-        pitch_bounds = (4e-3*scale, 12e-3*scale)
+        minimum_pitch = max(
+            COIL_PITCH_RANGE_LAMBDA[0]*wavelength,
+            MINIMUM_PITCH_WIRE_DIAMETERS*wire_diameter,
+        )
+        pitch_bounds = (
+            minimum_pitch,
+            max(
+                COIL_PITCH_RANGE_LAMBDA[1]*wavelength,
+                6.0*wire_diameter,
+                1.5*minimum_pitch,
+            ),
+        )
         for pitch in original_pitches:
             pitch_bounds = enclose(pitch_bounds, pitch)
         variables.append(
@@ -246,14 +309,29 @@ def make_space(
                 label="shared_coil_pitch",
             )
         )
-        radius_bounds = (7e-3*scale, 16e-3*scale)
-        for radius in original_radii:
-            radius_bounds = enclose(radius_bounds, radius)
-        minimum_radius = max(
+        hard_minimum_radius = max(
             0.5001*coil.transition_offset for coil in base.coils
         )
+        preferred_minimum_radius = max(
+            COIL_RADIUS_RANGE_LAMBDA[0]*wavelength,
+            MINIMUM_RADIUS_WIRE_DIAMETERS*wire_diameter,
+            max(
+                0.5001*coil.transition_offset + base.wire_radius
+                for coil in base.coils
+            ),
+        )
         radius_bounds = (
-            max(minimum_radius, radius_bounds[0]),
+            preferred_minimum_radius,
+            max(
+                COIL_RADIUS_RANGE_LAMBDA[1]*wavelength,
+                8.0*wire_diameter,
+                1.5*preferred_minimum_radius,
+            ),
+        )
+        for radius in original_radii:
+            radius_bounds = enclose(radius_bounds, radius)
+        radius_bounds = (
+            max(hard_minimum_radius, radius_bounds[0]),
             radius_bounds[1],
         )
         variables.append(
@@ -269,33 +347,66 @@ def make_space(
         )
     else:
         for index, coil in enumerate(base.coils):
+            minimum_pitch = max(
+                COIL_PITCH_RANGE_LAMBDA[0]*wavelength,
+                MINIMUM_PITCH_WIRE_DIAMETERS*wire_diameter,
+            )
             pitch_bounds = enclose(
-                (4e-3*scale, 12e-3*scale),
+                (
+                    minimum_pitch,
+                    max(
+                        COIL_PITCH_RANGE_LAMBDA[1]*wavelength,
+                        6.0*wire_diameter,
+                        1.5*minimum_pitch,
+                    ),
+                ),
                 coil.pitch,
             )
             variables.append(
                 DesignVariable(f"coils.{index}.pitch", *pitch_bounds)
             )
         for index, coil in enumerate(base.coils):
+            hard_minimum_radius = 0.5001*coil.transition_offset
+            preferred_minimum_radius = max(
+                COIL_RADIUS_RANGE_LAMBDA[0]*wavelength,
+                MINIMUM_RADIUS_WIRE_DIAMETERS*wire_diameter,
+                0.5001*coil.transition_offset + base.wire_radius,
+            )
             radius_bounds = enclose(
-                (7e-3*scale, 16e-3*scale),
+                (
+                    preferred_minimum_radius,
+                    max(
+                        COIL_RADIUS_RANGE_LAMBDA[1]*wavelength,
+                        8.0*wire_diameter,
+                        1.5*preferred_minimum_radius,
+                    ),
+                ),
                 coil.radius,
             )
-            minimum_radius = 0.5001*coil.transition_offset
             radius_bounds = (
-                max(minimum_radius, radius_bounds[0]),
+                max(hard_minimum_radius, radius_bounds[0]),
                 radius_bounds[1],
             )
             variables.append(
                 DesignVariable(f"coils.{index}.radius", *radius_bounds)
             )
+    minimum_radial = max(
+        RADIAL_LENGTH_RANGE_LAMBDA[0]*wavelength,
+        MINIMUM_STRAIGHT_WIRE_DIAMETERS*wire_diameter,
+    )
     radial_bounds = enclose(
-        (55e-3*scale, 120e-3*scale),
+        (
+            minimum_radial,
+            max(
+                RADIAL_LENGTH_RANGE_LAMBDA[1]*wavelength,
+                1.5*minimum_radial,
+            ),
+        ),
         base.radial_length,
     )
     angle_bounds = (
-        max(0.1, min(20.0, base.radial_angle_deg - 10.0)),
-        min(89.9, max(70.0, base.radial_angle_deg + 10.0)),
+        max(0.1, min(5.0, base.radial_angle_deg - 10.0)),
+        min(89.9, max(75.0, base.radial_angle_deg + 10.0)),
     )
     variables.extend(
         (
@@ -330,6 +441,16 @@ def result_payload(
         "seed": seed,
         "evaluations_at_save": evaluations,
         "variables": dict(zip(space.names, record.vector)),
+        "search_space": {
+            "initial_variables": {
+                name: float(value)
+                for name, value in zip(space.names, space.initial_vector)
+            },
+            "bounds": {
+                name: [lower, upper]
+                for name, (lower, upper) in zip(space.names, space.bounds)
+            },
+        },
         "design": asdict(design),
     }
     if simulation_metadata is not None:
@@ -596,7 +717,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--maximum-height-mm",
         type=float,
-        help="height before penalty; defaults to 600 mm scaled by wavelength",
+        help=(
+            "height before penalty; by default uses (0.70 + 0.50 per coil) "
+            "wavelengths for the largest requested topology"
+        ),
     )
     parser.add_argument("--s11-limit-db", type=float, default=-10.0)
     parser.add_argument("--mismatch-weight", type=float, default=2.0)
@@ -655,9 +779,13 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--match-bandwidth-mhz must be positive and below twice the target"
         )
-    if args.maximum_height_mm is None:
-        args.maximum_height_mm = 600.0*frequency_scale
-    if not np.isfinite(args.maximum_height_mm) or args.maximum_height_mm <= 0:
+    if (
+        args.maximum_height_mm is not None
+        and (
+            not np.isfinite(args.maximum_height_mm)
+            or args.maximum_height_mm <= 0
+        )
+    ):
         parser.error("--maximum-height-mm must be finite and positive")
     if args.maxiter is None and args.hours is None:
         args.maxiter = 20
@@ -947,6 +1075,12 @@ def run_campaign(args: argparse.Namespace) -> None:
     args.finetune = bool(getattr(args, "finetune", False))
     initial = load_baseline(args.warm_start, frequency_hz)
     resolve_topology(args, initial)
+    automatic_height = args.maximum_height_mm is None
+    if automatic_height:
+        args.maximum_height_mm = 1e3*default_maximum_height(
+            frequency_hz,
+            max(args.coil_counts),
+        )
     schedules = build_case_schedules(args, initial, frequency_hz)
     convergence_benchmark = load_reference_design(frequency_hz)
     mesh = replace(
@@ -981,6 +1115,19 @@ def run_campaign(args: argparse.Namespace) -> None:
         "coil_parameterization": (
             "independent" if args.finetune else "shared"
         ),
+        "search_bounds": {
+            "policy": "wavelength_wire_v1",
+            "wavelength_m": free_space_wavelength(frequency_hz),
+            "wire_diameter_m": 2*initial.wire_radius,
+            "maximum_height_m": args.maximum_height_mm*1e-3,
+            "maximum_height_wavelengths": (
+                args.maximum_height_mm*1e-3
+                / free_space_wavelength(frequency_hz)
+            ),
+            "maximum_height_source": (
+                "automatic" if automatic_height else "command_line"
+            ),
+        },
         "convergence_status": (
             "skipped"
             if args.skip_convergence_check
@@ -1025,9 +1172,21 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Pattern limits  : horizon min {args.minimum_horizon_gain_dbi:.1f} dBi, "
         f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
     )
+    height_wavelengths = (
+        args.maximum_height_mm*1e-3/free_space_wavelength(frequency_hz)
+    )
     print(
-        f"Physical limit  : {args.maximum_height_mm:.1f} mm maximum height "
-        "before penalty"
+        f"Physical limit  : {args.maximum_height_mm:.1f} mm "
+        f"({height_wavelengths:.2f} lambda) maximum height before penalty"
+        + (" [automatic]" if automatic_height else "")
+    )
+    print(
+        "Length priors   : bare 0.18-0.70 lambda; loaded sections "
+        "0.15-0.72 lambda"
+    )
+    print(
+        "Coil/radial     : pitch 0.010-0.040 lambda, radius "
+        "0.015-0.050 lambda, radials 0.15-0.40 lambda; wire floors apply"
     )
     print(
         "Coil counts     : "
