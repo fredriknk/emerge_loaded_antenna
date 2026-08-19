@@ -1,4 +1,4 @@
-"""Run and certify 868 MHz open-region and mesh convergence."""
+"""Run and certify open-region and mesh convergence at any frequency."""
 
 from __future__ import annotations
 
@@ -23,18 +23,19 @@ from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
     OpenRegionSettings,
-    REFERENCE_868MHZ_DESIGN_PATH,
+    REFERENCE_DESIGN_FREQUENCY_HZ,
     SOLVER_CHOICES,
     SimulationOptions,
     design_fingerprint,
     load_design,
+    load_reference_design,
+    save_design,
     selected_open_region_configuration,
     simulate,
 )
 
-FREQUENCY = 868e6
 DEFAULT_TOLERANCES = {
-    "reflection_coefficient": 0.05,
+    "reflection_magnitude": 0.05,
     "peak_gain_dbi": 0.50,
     "horizon_min_gain_dbi": 0.35,
     "horizon_p10_gain_dbi": 0.25,
@@ -69,6 +70,7 @@ def sample_key(air_margin: float, abc_buffer: float, resolution: float) -> str:
 
 def run_sample(
     design,
+    frequency_hz: float,
     air_margin: float,
     abc_buffer: float,
     resolution: float,
@@ -86,13 +88,13 @@ def run_sample(
         abc_buffer_wavelengths=abc_buffer,
     )
     options = SimulationOptions(
-        sweep=FrequencySweep.single(FREQUENCY),
+        sweep=FrequencySweep.single(frequency_hz),
         mesh=mesh,
         open_region=open_region,
         solve=True,
         solver=solver,
         compute_farfield=True,
-        farfield_frequency=FREQUENCY,
+        farfield_frequency=frequency_hz,
         farfield_angular_step_deg=angular_step,
         verbose=False,
     )
@@ -117,7 +119,7 @@ def run_sample(
         ),
         "s11_real": s11.real,
         "s11_imag": s11.imag,
-        "s11_db": result.s11_db_at(FREQUENCY),
+        "s11_db": result.s11_db_at(frequency_hz),
         "peak_gain_dbi": metrics.peak_gain_dbi,
         "peak_theta_deg": metrics.peak_theta_deg,
         "peak_phi_deg": metrics.peak_phi_deg,
@@ -130,7 +132,8 @@ def run_sample(
 
 
 def run_sample_isolated(
-    source: Path,
+    design,
+    frequency_hz: float,
     air_margin: float,
     abc_buffer: float,
     resolution: float,
@@ -140,11 +143,15 @@ def run_sample_isolated(
 ) -> dict:
     """Run one EMerge model in a fresh process to isolate its global CAD state."""
     with tempfile.TemporaryDirectory(prefix="antenna-convergence-") as temporary:
+        source = Path(temporary)/"design.json"
         output = Path(temporary)/"sample.json"
+        save_design(design, source)
         command = (
             sys.executable,
             str(Path(__file__).resolve()),
             str(source),
+            "--frequency-mhz",
+            f"{frequency_hz/1e6:.12g}",
             "--worker-output",
             str(output),
             "--worker-air-margin",
@@ -215,7 +222,7 @@ def compare_samples(
     s11_selected = complex(selected["s11_real"], selected["s11_imag"])
     s11_reference = complex(reference["s11_real"], reference["s11_imag"])
     deltas = {
-        "reflection_coefficient": abs(s11_selected - s11_reference),
+        "reflection_magnitude": abs(abs(s11_selected) - abs(s11_reference)),
         "peak_gain_dbi": abs(
             selected["peak_gain_dbi"] - reference["peak_gain_dbi"]
         ),
@@ -256,16 +263,23 @@ def parse_args() -> argparse.Namespace:
         "result",
         nargs="?",
         type=Path,
-        default=REFERENCE_868MHZ_DESIGN_PATH,
         help=(
-            "representative design or optimizer result (default: tracked "
-            "868 MHz reference design)"
+            "optional design or optimizer result; defaults to a generated "
+            "wavelength-scaled numerical reference"
+        ),
+    )
+    parser.add_argument(
+        "--frequency-mhz",
+        type=float,
+        help=(
+            "solve frequency; inferred from optimizer output, otherwise "
+            f"defaults to {REFERENCE_DESIGN_FREQUENCY_HZ/1e6:g} MHz"
         ),
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("optimization_results/open_region_convergence.json"),
+        help="certificate path; defaults to a frequency-specific result file",
     )
     parser.add_argument("--air-margins", type=parse_float_list, default=(0.20, 0.25, 0.35))
     parser.add_argument("--abc-buffers", type=parse_float_list, default=(0.75, 1.00, 1.25))
@@ -281,6 +295,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-abc-buffer", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--worker-resolution", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.frequency_mhz is not None and (
+        not math.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0
+    ):
+        parser.error("--frequency-mhz must be finite and positive")
     selected = (
         args.selected_air_margin,
         args.selected_abc_buffer,
@@ -301,16 +319,42 @@ def parse_args() -> argparse.Namespace:
             parser.error(
                 "--mesh-resolutions must include a value below the selected resolution"
             )
+    elif args.result is None:
+        parser.error("internal convergence workers require a design file")
     return args
 
 
 def main() -> None:
     args = parse_args()
-    design = load_design(args.result)
+    source_frequency = None
+    if args.result is not None:
+        source_payload = json.loads(args.result.read_text(encoding="utf-8"))
+        if isinstance(source_payload, dict):
+            source_frequency = source_payload.get("frequency_hz")
+    if args.frequency_mhz is not None:
+        args.frequency_hz = args.frequency_mhz*1e6
+    elif source_frequency is not None:
+        args.frequency_hz = float(source_frequency)
+    else:
+        args.frequency_hz = REFERENCE_DESIGN_FREQUENCY_HZ
+    if not math.isfinite(args.frequency_hz) or args.frequency_hz <= 0:
+        raise SystemExit("Design metadata contains an invalid frequency_hz")
+    args.frequency_mhz = args.frequency_hz/1e6
+    if args.output is None:
+        args.output = Path("optimization_results")/(
+            f"open_region_convergence_{round(args.frequency_hz)}hz.json"
+        )
+    if args.result is None:
+        design = load_reference_design(args.frequency_hz)
+        source_label = "generated wavelength-scaled numerical reference"
+    else:
+        design = load_design(args.result)
+        source_label = str(args.result.resolve())
     if args.worker_output is not None:
         try:
             sample = run_sample(
                 design,
+                args.frequency_hz,
                 args.worker_air_margin,
                 args.worker_abc_buffer,
                 args.worker_resolution,
@@ -346,8 +390,8 @@ def main() -> None:
     )
     probes = list(dict.fromkeys(probes))
 
-    print("OPEN-REGION CONVERGENCE @ 868 MHz")
-    print(f"Design          : {args.result.resolve()}")
+    print(f"OPEN-REGION CONVERGENCE @ {args.frequency_mhz:g} MHz")
+    print(f"Design          : {source_label}")
     print("Boundary        : closed Huygens box + all-face buffered ABC")
     print(f"Solved probes   : {len(probes)}")
     print(f"Certificate     : {args.output.resolve()}\n")
@@ -358,7 +402,8 @@ def main() -> None:
         print(f"[{index}/{len(probes)}] {key} ...", end=" ", flush=True)
         try:
             sample = run_sample_isolated(
-                args.result,
+                design,
+                args.frequency_hz,
                 air_margin,
                 abc_buffer,
                 resolution,
@@ -428,8 +473,8 @@ def main() -> None:
         "schema_version": CONVERGENCE_SCHEMA_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "passed": passed,
-        "frequency_hz": FREQUENCY,
-        "source": str(args.result.resolve()),
+        "frequency_hz": args.frequency_hz,
+        "source": source_label,
         "design_fingerprint": design_fingerprint(design),
         "design": asdict(design),
         "selected_configuration": selected_open_region_configuration(

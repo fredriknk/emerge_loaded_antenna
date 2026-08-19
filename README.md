@@ -150,27 +150,46 @@ in a requested direction while penalizing worst-band mismatch, azimuth ripple,
 deep nulls and excessive height. All objectives retain evaluation history and
 convert geometry/solver failures into a finite penalty.
 
-### Twelve-hour robust campaign
+### Robust optimization campaign
 
-Start the campaign directly:
+The default remains 868 MHz, so the existing twelve-hour command still works:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
 ```
 
-Before the optimization timer starts, the script checks
-`optimization_results/open_region_convergence.json`. If the report is missing
-or does not match the warm-start design and numerical settings, it
-automatically runs seven isolated solves that vary Huygens clearance, ABC
-distance, and air-mesh resolution. Optimization starts only after those checks
-pass. The certificate is reused on later runs with matching inputs. A fresh
-clone warm-starts from the tracked, known-convergent design at
-`emerge_loaded_antenna/data/868mhz_reference_design.json`.
+The target is not hard-coded. For example, a fresh 915 MHz search over a
+20 MHz matching band is:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --frequency-mhz 915 `
+    --match-bandwidth-mhz 20 `
+    --hours 12
+```
+
+With no `--warm-start`, the script synthesizes an electrically equivalent
+starting geometry by scaling every length with wavelength. The dimensional
+search bounds and default maximum-height penalty scale the same way. This is
+only an initial point for differential evolution, not a required pre-optimized
+antenna. Supply any current-schema design or campaign result with
+`--warm-start`; its physical dimensions, coil count and turn counts are used
+as written unless `--coil-count` or `--turn-cases` explicitly overrides them.
+
+Before the optimization timer starts, the script checks a frequency-specific
+certificate such as
+`optimization_results/open_region_convergence_915000000hz.json`. If missing or
+mismatched, it runs seven isolated solves that vary Huygens clearance, ABC
+distance, and air-mesh resolution. This preflight uses a wavelength-scaled
+numerical reference problem, independently of the user's starting antenna, so
+poor initial S11 or gain cannot block a new search. The certificate is reused
+for later runs with matching frequency and numerical settings.
 
 The convergence campaign can also be run explicitly:
 
 ```powershell
-.\.venv\Scripts\python.exe -u .\examples\check_open_region.py
+.\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
+    --frequency-mhz 915
 ```
 
 `--no-auto-convergence` restores fail-fast behavior when a pre-generated report
@@ -185,7 +204,7 @@ explicitly:
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12 `
     --warm-start `
-    .\optimization_results\robust_YYYYMMDD_HHMMSS\campaign_best.json
+    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json
 ```
 
 The wall-time conversion assumes roughly eight seconds per robust evaluation;
@@ -193,10 +212,12 @@ override it with `--seconds-per-eval` if the live ETA on your machine settles
 substantially higher or lower.
 
 It searches every straight length, every coil pitch and radius, radial length,
-and radial angle. S11 is constrained at 863, 868 and 873 MHz. Every run receives
-the saved winner as `x0`; each candidate is flushed to CSV and every new global
-best is atomically checkpointed as `campaign_best.json`. Output goes into a
-new timestamped directory so previous campaigns are never overwritten.
+and radial angle. S11 is constrained at the lower edge, center and upper edge
+of the requested matching band. Every run receives the synthesized or supplied
+design as `x0`; each candidate is flushed to CSV and every new global best is
+atomically checkpointed as `campaign_best.json`. Output goes into a new
+frequency-labelled timestamped directory so previous campaigns are never
+overwritten.
 
 Choose the coil count explicitly. A zero-coil campaign optimizes a conventional
 straight radiator:
@@ -233,14 +254,23 @@ Verify a campaign winner with:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\verify_best.py `
-    .\optimization_results\robust_YYYYMMDD_HHMMSS\campaign_best.json `
+    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json `
     --show-3d
 ```
 
 This repeats the design on coarse and fine meshes, samples the 3D pattern at
-0.5-degree resolution, sweeps 853-883 MHz, reports peak direction and horizon
-statistics, and saves S11, XY/horizon and XZ/YZ/XY plots plus JSON convergence
-data.
+0.5-degree resolution, infers the target frequency from the campaign result,
+reports peak direction and horizon statistics, and saves S11, XY/horizon and
+XZ/YZ/XY plots plus JSON convergence data. For a final seven-probe open-region
+certificate on the actual winner, run:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
+    .\optimization_results\915mhz_YYYYMMDD_HHMMSS\campaign_best.json
+```
+
+The initial reference preflight establishes sane campaign numerics; this final
+design-specific check is the evidence to use when reporting the winning gain.
 
 EMerge and Gmsh use process-global model state. Sequential evaluations in one
 process are supported and tested. Use separate processes—not worker threads—

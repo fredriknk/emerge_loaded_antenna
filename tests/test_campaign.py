@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 from emerge_loaded_antenna import (
     AntennaDesign,
+    CoilDesign,
     EvaluationRecord,
     MeshSettings,
     OpenRegionSettings,
-    REFERENCE_868MHZ_DESIGN_PATH,
-    load_reference_868mhz_design,
+    REFERENCE_DESIGN_FREQUENCY_HZ,
+    load_reference_design,
 )
 from examples.optimize_gain import (
     CampaignProgress,
@@ -25,26 +26,56 @@ from examples.optimize_gain import (
     make_space,
     parse_args,
     parse_turn_cases,
+    resolve_topology,
 )
 
 
 class CampaignTests(unittest.TestCase):
-    def test_fresh_clone_uses_tracked_reference_design(self):
+    def test_fresh_clone_synthesizes_a_frequency_scaled_design(self):
         with patch("sys.argv", ["optimize_gain.py"]):
             args = parse_args()
 
-        self.assertEqual(args.warm_start, REFERENCE_868MHZ_DESIGN_PATH)
-        self.assertTrue(args.warm_start.is_file())
+        self.assertIsNone(args.warm_start)
+        self.assertIsNone(args.coil_count)
+        self.assertIsNone(args.turn_cases)
         self.assertEqual(
-            load_baseline(args.warm_start),
-            load_reference_868mhz_design(),
+            load_baseline(None, args.frequency_hz),
+            load_reference_design(args.frequency_hz),
+        )
+
+        half_frequency = REFERENCE_DESIGN_FREQUENCY_HZ/2
+        scaled = load_baseline(None, half_frequency)
+        reference = load_reference_design()
+        self.assertAlmostEqual(scaled.wire_radius, 2*reference.wire_radius)
+        self.assertAlmostEqual(scaled.radial_length, 2*reference.radial_length)
+        self.assertAlmostEqual(
+            sum(scaled.straight_lengths),
+            2*sum(reference.straight_lengths),
         )
 
     def test_missing_warm_start_does_not_silently_change_design(self):
         with TemporaryDirectory() as temporary:
             missing = Path(temporary)/"missing.json"
             with self.assertRaisesRegex(SystemExit, "WARM START FAILED"):
-                load_baseline(missing)
+                load_baseline(missing, REFERENCE_DESIGN_FREQUENCY_HZ)
+
+    def test_frequency_scales_defaults_and_search_bounds(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--frequency-mhz", "434"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.frequency_hz, 434e6)
+        self.assertAlmostEqual(args.match_bandwidth_mhz, 5.0)
+        self.assertAlmostEqual(args.maximum_height_mm, 1200.0)
+        self.assertIn("434000000hz", str(args.convergence_report))
+        bounds_868 = make_space(load_reference_design(868e6), 868e6).bounds
+        bounds_434 = make_space(load_reference_design(434e6), 434e6).bounds
+        for first, second in zip(bounds_868[:-1], bounds_434[:-1]):
+            self.assertAlmostEqual(second[0], 2*first[0])
+            self.assertAlmostEqual(second[1], 2*first[1])
+        self.assertEqual(bounds_868[-1], bounds_434[-1])
 
     def test_twelve_hour_budget_is_split_across_seeds(self):
         args = Namespace(
@@ -76,6 +107,34 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(three.straight_lengths), 4)
         self.assertEqual(len(make_space(zero).variables), 3)
         self.assertEqual(len(make_space(three).variables), 12)
+
+    def test_custom_start_is_inside_the_generated_search_space(self):
+        custom = AntennaDesign(
+            radial_length=0.2,
+            radial_angle_deg=80.0,
+            straight_lengths=(0.25, 0.35, 0.25),
+        )
+        space = make_space(custom, REFERENCE_DESIGN_FREQUENCY_HZ)
+
+        for value, (lower, upper) in zip(space.initial_vector, space.bounds):
+            self.assertLessEqual(lower, value)
+            self.assertGreaterEqual(upper, value)
+
+    def test_unspecified_topology_is_inferred_from_custom_start(self):
+        custom = AntennaDesign(
+            straight_lengths=(0.1, 0.1, 0.1, 0.1),
+            coils=(
+                CoilDesign(turns=1),
+                CoilDesign(turns=2),
+                CoilDesign(turns=3),
+            ),
+        )
+        args = Namespace(coil_count=None, turn_cases=None)
+
+        resolve_topology(args, custom)
+
+        self.assertEqual(args.coil_count, 3)
+        self.assertEqual(args.turn_cases, ((1, 2, 3),))
 
     def test_cli_accepts_zero_and_arbitrary_coil_counts(self):
         with patch("sys.argv", ["optimize_gain.py", "--coil-count", "0"]):
@@ -124,6 +183,7 @@ class CampaignTests(unittest.TestCase):
                     AntennaDesign(),
                     MeshSettings(),
                     OpenRegionSettings(),
+                    REFERENCE_DESIGN_FREQUENCY_HZ,
                 )
 
             self.assertEqual(result, certificate)
@@ -131,8 +191,11 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             command = run.call_args.args[0]
             self.assertIn("check_open_region.py", command[2])
+            self.assertIn("--frequency-mhz", command)
             self.assertIn("--selected-resolution", command)
-            self.assertTrue((args.output/"baseline_design.json").exists())
+            self.assertTrue(
+                (args.output/"convergence_reference_design.json").exists()
+            )
 
     def test_matching_certificate_is_reused_without_subprocess(self):
         args = Namespace(
@@ -155,6 +218,7 @@ class CampaignTests(unittest.TestCase):
                 AntennaDesign(),
                 MeshSettings(),
                 OpenRegionSettings(),
+                REFERENCE_DESIGN_FREQUENCY_HZ,
             )
 
         self.assertEqual(result, certificate)
@@ -181,6 +245,7 @@ class CampaignTests(unittest.TestCase):
                 AntennaDesign(),
                 MeshSettings(),
                 OpenRegionSettings(),
+                REFERENCE_DESIGN_FREQUENCY_HZ,
             )
 
         run.assert_not_called()
@@ -204,6 +269,7 @@ class CampaignTests(unittest.TestCase):
                 total=1,
                 report_every=1,
                 variable_names=space.names,
+                frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
             )
             progress.set_context(space, (1, 1), seed=2)
             progress(record)
@@ -232,6 +298,7 @@ class CampaignTests(unittest.TestCase):
                 total=1,
                 report_every=1,
                 variable_names=space.names,
+                frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
             )
             progress.set_context(space, (), seed=2)
             progress(record)

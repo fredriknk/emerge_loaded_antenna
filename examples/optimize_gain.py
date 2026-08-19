@@ -1,4 +1,4 @@
-"""Warm-started, multi-seed robust gain optimization at 868 MHz."""
+"""Frequency-scalable, multi-seed robust loaded-antenna optimization."""
 
 from __future__ import annotations
 
@@ -20,29 +20,27 @@ import numpy as np
 
 from emerge_loaded_antenna import (
     AntennaDesign,
-    CoilDesign,
     DesignSpace,
     DesignVariable,
     EvaluationRecord,
     FrequencySweep,
     MeshSettings,
     OpenRegionSettings,
-    REFERENCE_868MHZ_DESIGN_PATH,
+    REFERENCE_DESIGN_FREQUENCY_HZ,
     RobustGainObjective,
     SOLVER_CHOICES,
     SimulationOptions,
     load_design,
+    load_reference_design,
     save_design,
     selected_open_region_configuration,
     validate_convergence_certificate,
 )
 
-FREQUENCY = 868e6
 METRIC_FIELDS = (
-    "s11_863_mhz_db",
-    "s11_868_mhz_db",
-    "s11_873_mhz_db",
+    "s11_low_db",
     "center_s11_db",
+    "s11_high_db",
     "worst_s11_db",
     "useful_gain_dbi",
     "peak_gain_dbi",
@@ -113,7 +111,11 @@ def write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def design_for_coil_count(base: AntennaDesign, coil_count: int) -> AntennaDesign:
+def design_for_coil_count(
+    base: AntennaDesign,
+    coil_count: int,
+    frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
+) -> AntennaDesign:
     """Resize a warm-start design while preserving total straight length."""
     if (
         isinstance(coil_count, bool)
@@ -127,7 +129,12 @@ def design_for_coil_count(base: AntennaDesign, coil_count: int) -> AntennaDesign
 
     section_length = sum(base.straight_lengths)/(coil_count + 1)
     coils = base.coils[:coil_count]
-    coils += tuple(CoilDesign() for _ in range(coil_count - len(coils)))
+    template = (
+        base.coils[-1]
+        if base.coils
+        else load_reference_design(frequency_hz).coils[0]
+    )
+    coils += tuple(template for _ in range(coil_count - len(coils)))
     return replace(
         base,
         straight_lengths=(section_length,)*(coil_count + 1),
@@ -138,8 +145,9 @@ def design_for_coil_count(base: AntennaDesign, coil_count: int) -> AntennaDesign
 def design_for_turn_case(
     base: AntennaDesign,
     turn_case: tuple[int, ...],
+    frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
 ) -> AntennaDesign:
-    design = design_for_coil_count(base, len(turn_case))
+    design = design_for_coil_count(base, len(turn_case), frequency_hz)
     return replace(
         design,
         coils=tuple(
@@ -149,35 +157,78 @@ def design_for_turn_case(
     )
 
 
-def make_space(base: AntennaDesign) -> DesignSpace:
-    """Continuous variables; coil turns are fixed by the surrounding case."""
+def make_space(
+    base: AntennaDesign,
+    frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
+) -> DesignSpace:
+    """Create wavelength-scaled bounds; turns stay fixed per discrete case."""
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0:
+        raise ValueError("frequency_hz must be finite and positive")
+    scale = REFERENCE_DESIGN_FREQUENCY_HZ/frequency_hz
+    def enclose(
+        bounds: tuple[float, float],
+        value: float,
+    ) -> tuple[float, float]:
+        lower, upper = bounds
+        return min(lower, 0.8*value), max(upper, 1.2*value)
+
     if base.coil_count == 2:
-        straight_bounds = (
-            (80e-3, 200e-3),
-            (120e-3, 280e-3),
-            (80e-3, 200e-3),
+        default_straight_bounds = (
+            (80e-3*scale, 200e-3*scale),
+            (120e-3*scale, 280e-3*scale),
+            (80e-3*scale, 200e-3*scale),
         )
     elif base.coil_count == 0:
-        straight_bounds = ((40e-3, 600e-3),)
+        default_straight_bounds = ((40e-3*scale, 600e-3*scale),)
     else:
-        straight_bounds = ((40e-3, 300e-3),)*len(base.straight_lengths)
+        default_straight_bounds = (
+            (40e-3*scale, 300e-3*scale),
+        )*len(base.straight_lengths)
+    straight_bounds = tuple(
+        enclose(bounds, value)
+        for bounds, value in zip(
+            default_straight_bounds,
+            base.straight_lengths,
+        )
+    )
 
     variables = [
         DesignVariable(f"straight_lengths.{index}", lower, upper)
         for index, (lower, upper) in enumerate(straight_bounds)
     ]
-    variables.extend(
-        DesignVariable(f"coils.{index}.pitch", 4e-3, 12e-3)
-        for index in range(base.coil_count)
+    for index, coil in enumerate(base.coils):
+        pitch_bounds = enclose(
+            (4e-3*scale, 12e-3*scale),
+            coil.pitch,
+        )
+        variables.append(
+            DesignVariable(f"coils.{index}.pitch", *pitch_bounds)
+        )
+    for index, coil in enumerate(base.coils):
+        radius_bounds = enclose(
+            (7e-3*scale, 16e-3*scale),
+            coil.radius,
+        )
+        minimum_radius = 0.5001*coil.transition_offset
+        radius_bounds = (
+            max(minimum_radius, radius_bounds[0]),
+            radius_bounds[1],
+        )
+        variables.append(
+            DesignVariable(f"coils.{index}.radius", *radius_bounds)
+        )
+    radial_bounds = enclose(
+        (55e-3*scale, 120e-3*scale),
+        base.radial_length,
     )
-    variables.extend(
-        DesignVariable(f"coils.{index}.radius", 7e-3, 16e-3)
-        for index in range(base.coil_count)
+    angle_bounds = (
+        max(0.1, min(20.0, base.radial_angle_deg - 10.0)),
+        min(89.9, max(70.0, base.radial_angle_deg + 10.0)),
     )
     variables.extend(
         (
-            DesignVariable("radial_length", 55e-3, 120e-3),
-            DesignVariable("radial_angle_deg", 20.0, 70.0),
+            DesignVariable("radial_length", *radial_bounds),
+            DesignVariable("radial_angle_deg", *angle_bounds),
         )
     )
     return DesignSpace(
@@ -192,11 +243,12 @@ def result_payload(
     turn_case: tuple[int, ...],
     seed: int,
     evaluations: int,
+    frequency_hz: float,
     simulation_metadata: dict | None = None,
 ) -> dict:
     design = space.decode(record.vector)
     payload = {
-        "frequency_hz": FREQUENCY,
+        "frequency_hz": frequency_hz,
         "objective": record.score,
         "s11_db": record.s11_db,
         "peak_gain_dbi": record.peak_gain_dbi,
@@ -222,6 +274,7 @@ class CampaignProgress:
         total: int,
         report_every: int,
         variable_names: tuple[str, ...],
+        frequency_hz: float,
         simulation_metadata: dict | None = None,
     ):
         self.output = output
@@ -235,6 +288,7 @@ class CampaignProgress:
         self.best_turn_case: tuple[int, ...] = ()
         self.best_seed = 0
         self.last_reported_best: EvaluationRecord | None = None
+        self.frequency_hz = frequency_hz
         self.simulation_metadata = simulation_metadata
         self.space: DesignSpace | None = None
         self.turn_case: tuple[int, ...] = ()
@@ -289,6 +343,7 @@ class CampaignProgress:
                 self.turn_case,
                 self.seed,
                 self.count,
+                self.frequency_hz,
                 self.simulation_metadata,
             )
             write_json(self.output/"campaign_best.json", payload)
@@ -353,8 +408,22 @@ class CampaignProgress:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Warm-started multi-seed optimization of useful 868 MHz gain, "
-            "broadband match, pattern quality and antenna height."
+            "Multi-seed optimization of useful gain, broadband match, "
+            "pattern quality and antenna height at any target frequency."
+        ),
+    )
+    parser.add_argument(
+        "--frequency-mhz",
+        type=float,
+        default=REFERENCE_DESIGN_FREQUENCY_HZ/1e6,
+        help="target frequency in MHz (default: %(default)g)",
+    )
+    parser.add_argument(
+        "--match-bandwidth-mhz",
+        type=float,
+        help=(
+            "total three-point S11 span in MHz; defaults to the same "
+            "fractional bandwidth as 10 MHz at 868 MHz"
         ),
     )
     budget = parser.add_mutually_exclusive_group()
@@ -370,7 +439,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--coil-count",
         type=int,
-        help="number of loading coils; defaults to two",
+        help="number of loading coils; otherwise inferred from the start design",
     )
     parser.add_argument(
         "--turn-cases",
@@ -384,10 +453,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warm-start",
         type=Path,
-        default=REFERENCE_868MHZ_DESIGN_PATH,
         help=(
-            "design or optimizer-result JSON (default: tracked 868 MHz "
-            "reference design)"
+            "optional design or optimizer-result JSON; when omitted, a "
+            "wavelength-scaled starting geometry is synthesized"
         ),
     )
     parser.add_argument(
@@ -402,7 +470,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--target-theta", type=float, default=90.0)
     parser.add_argument("--target-phi", type=float, default=0.0)
-    parser.add_argument("--maximum-height-mm", type=float, default=600.0)
+    parser.add_argument(
+        "--maximum-height-mm",
+        type=float,
+        help="height before penalty; defaults to 600 mm scaled by wavelength",
+    )
     parser.add_argument("--s11-limit-db", type=float, default=-10.0)
     parser.add_argument("--mismatch-weight", type=float, default=2.0)
     parser.add_argument("--minimum-horizon-gain-dbi", type=float, default=2.0)
@@ -417,8 +489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--convergence-report",
         type=Path,
-        default=Path("optimization_results/open_region_convergence.json"),
-        help="certificate path to reuse or generate automatically",
+        help="numerical benchmark certificate to reuse or generate",
     )
     parser.add_argument(
         "--skip-convergence-check",
@@ -438,6 +509,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--polish", action="store_true")
     args = parser.parse_args()
+    if not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0:
+        parser.error("--frequency-mhz must be finite and positive")
+    args.frequency_hz = args.frequency_mhz*1e6
+    frequency_scale = REFERENCE_DESIGN_FREQUENCY_HZ/args.frequency_hz
+    if args.match_bandwidth_mhz is None:
+        args.match_bandwidth_mhz = 10.0/frequency_scale
+    if (
+        not np.isfinite(args.match_bandwidth_mhz)
+        or args.match_bandwidth_mhz <= 0
+        or args.match_bandwidth_mhz >= 2*args.frequency_mhz
+    ):
+        parser.error(
+            "--match-bandwidth-mhz must be positive and below twice the target"
+        )
+    if args.maximum_height_mm is None:
+        args.maximum_height_mm = 600.0*frequency_scale
+    if not np.isfinite(args.maximum_height_mm) or args.maximum_height_mm <= 0:
+        parser.error("--maximum-height-mm must be finite and positive")
     if args.maxiter is None and args.hours is None:
         args.maxiter = 20
     if args.maxiter is not None and args.maxiter < 0:
@@ -456,8 +545,8 @@ def parse_args() -> argparse.Namespace:
     if args.coil_count is not None and args.coil_count < 0:
         parser.error("--coil-count must be non-negative")
     if args.turn_cases is None:
-        args.coil_count = 2 if args.coil_count is None else args.coil_count
-        args.turn_cases = ((1,)*args.coil_count,)
+        if args.coil_count is not None:
+            args.turn_cases = ((1,)*args.coil_count,)
     else:
         case_counts = {len(turn_case) for turn_case in args.turn_cases}
         if len(case_counts) != 1:
@@ -477,11 +566,25 @@ def parse_args() -> argparse.Namespace:
         parser.error("objective weights must be non-negative")
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output = Path("optimization_results")/f"robust_{stamp}"
+        frequency_label = f"{args.frequency_mhz:g}mhz".replace(".", "p")
+        args.output = Path("optimization_results")/f"{frequency_label}_{stamp}"
+    if args.convergence_report is None:
+        frequency_hz = round(args.frequency_hz)
+        args.convergence_report = Path(
+            "optimization_results"
+        )/f"open_region_convergence_{frequency_hz}hz.json"
     return args
 
 
-def load_baseline(path: Path) -> AntennaDesign:
+def load_baseline(path: Path | None, frequency_hz: float) -> AntennaDesign:
+    if path is None:
+        design = load_reference_design(frequency_hz)
+        scale = REFERENCE_DESIGN_FREQUENCY_HZ/frequency_hz
+        print(
+            "Initial design  : synthesized wavelength-scaled geometry "
+            f"(scale {scale:.6g})"
+        )
+        return design
     if not path.is_file():
         raise SystemExit(
             "WARM START FAILED\n"
@@ -489,8 +592,19 @@ def load_baseline(path: Path) -> AntennaDesign:
             "Pass an existing design or optimizer-result JSON with --warm-start."
         )
     design = load_design(path)
-    print(f"Warm start      : {path.resolve()}")
+    print(f"Initial design  : {path.resolve()}")
     return design
+
+
+def resolve_topology(
+    args: argparse.Namespace,
+    initial: AntennaDesign,
+) -> None:
+    """Infer unspecified coil and turn topology from the starting design."""
+    if args.coil_count is None:
+        args.coil_count = initial.coil_count
+    if args.turn_cases is None:
+        args.turn_cases = (tuple(coil.turns for coil in initial.coils),)
 
 
 def iterations_per_run(
@@ -512,18 +626,19 @@ def _number_list(*values: float) -> str:
 
 def ensure_convergence_certificate(
     args: argparse.Namespace,
-    baseline: AntennaDesign,
+    benchmark: AntennaDesign,
     mesh: MeshSettings,
     open_region: OpenRegionSettings,
+    frequency_hz: float,
 ) -> dict:
-    """Load a matching certificate, generating it once when necessary."""
+    """Certify numerical settings on a frequency-scaled reference problem."""
     try:
         return validate_convergence_certificate(
             args.convergence_report,
-            baseline,
+            benchmark,
             mesh,
             open_region,
-            FREQUENCY,
+            frequency_hz,
         )
     except RuntimeError as error:
         if args.no_auto_convergence:
@@ -542,14 +657,16 @@ def ensure_convergence_certificate(
         air_margin = mesh.air_margin_wavelengths
         abc_buffer = open_region.abc_buffer_wavelengths
         resolution = mesh.wavelength_resolution
-        source = args.output/"baseline_design.json"
-        save_design(baseline, source)
-        print(f"Baseline        : saved convergence snapshot to {source.resolve()}")
+        source = args.output/"convergence_reference_design.json"
+        save_design(benchmark, source)
+        print(f"Benchmark       : {source.resolve()}")
         command = (
             sys.executable,
             "-u",
             str(Path(__file__).with_name("check_open_region.py").resolve()),
             str(source.resolve()),
+            "--frequency-mhz",
+            f"{frequency_hz/1e6:.12g}",
             "--output",
             str(args.convergence_report.resolve()),
             "--air-margins",
@@ -577,10 +694,10 @@ def ensure_convergence_certificate(
         try:
             return validate_convergence_certificate(
                 args.convergence_report,
-                baseline,
+                benchmark,
                 mesh,
                 open_region,
-                FREQUENCY,
+                frequency_hz,
             )
         except RuntimeError as validation_error:
             raise SystemExit(
@@ -590,7 +707,11 @@ def ensure_convergence_certificate(
 
 
 def run_campaign(args: argparse.Namespace) -> None:
-    baseline = design_for_coil_count(load_baseline(args.warm_start), args.coil_count)
+    frequency_hz = args.frequency_hz
+    initial = load_baseline(args.warm_start, frequency_hz)
+    resolve_topology(args, initial)
+    baseline = design_for_coil_count(initial, args.coil_count, frequency_hz)
+    convergence_benchmark = load_reference_design(frequency_hz)
     mesh = replace(
         MeshSettings(),
         air_margin_wavelengths=args.air_margin_wavelengths,
@@ -605,21 +726,24 @@ def run_campaign(args: argparse.Namespace) -> None:
     if not args.skip_convergence_check:
         certificate = ensure_convergence_certificate(
             args,
-            baseline,
+            convergence_benchmark,
             mesh,
             open_region,
+            frequency_hz,
         )
     simulation_metadata = {
         "mesh": asdict(mesh),
         "open_region": asdict(open_region),
         "solver": args.solver,
+        "target_frequency_hz": frequency_hz,
+        "match_bandwidth_hz": args.match_bandwidth_mhz*1e6,
         "farfield_angular_step_deg": args.angular_step,
         "convergence_report": (
             str(args.convergence_report.resolve()) if certificate else None
         ),
     }
     run_count = len(args.seeds)*len(args.turn_cases)
-    baseline_space = make_space(baseline)
+    baseline_space = make_space(baseline, frequency_hz)
     variable_count = len(baseline_space.variables)
     maxiter = iterations_per_run(args, variable_count, run_count)
     population = args.popsize*variable_count
@@ -630,13 +754,19 @@ def run_campaign(args: argparse.Namespace) -> None:
         total,
         args.report_every,
         baseline_space.names,
+        frequency_hz,
         simulation_metadata,
     )
     run_summaries = []
 
-    print("ROBUST 868 MHz ANTENNA CAMPAIGN")
+    low_mhz = args.frequency_mhz - args.match_bandwidth_mhz/2
+    high_mhz = args.frequency_mhz + args.match_bandwidth_mhz/2
+    print(f"ROBUST {args.frequency_mhz:g} MHz ANTENNA CAMPAIGN")
     print(f"Pattern target  : {args.pattern}")
-    print("Match samples   : 863, 868 and 873 MHz")
+    print(
+        f"Match samples   : {low_mhz:g}, {args.frequency_mhz:g} and "
+        f"{high_mhz:g} MHz"
+    )
     print(
         f"Pattern limits  : horizon min {args.minimum_horizon_gain_dbi:.1f} dBi, "
         f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
@@ -672,26 +802,34 @@ def run_campaign(args: argparse.Namespace) -> None:
 
     try:
         for turn_case in args.turn_cases:
-            case_design = design_for_turn_case(baseline, turn_case)
-            space = make_space(case_design)
+            case_design = design_for_turn_case(
+                baseline,
+                turn_case,
+                frequency_hz,
+            )
+            space = make_space(case_design, frequency_hz)
             for seed in args.seeds:
                 run_name = f"turns_{format_turn_case(turn_case)}_seed_{seed}"
                 print(f"\nStarting {run_name}", flush=True)
                 progress.set_context(space, turn_case, seed)
                 options = SimulationOptions(
-                    sweep=FrequencySweep(center=FREQUENCY, span=10e6, points=3),
+                    sweep=FrequencySweep(
+                        center=frequency_hz,
+                        span=args.match_bandwidth_mhz*1e6,
+                        points=3,
+                    ),
                     mesh=mesh,
                     open_region=open_region,
                     solve=True,
                     solver=args.solver,
                     compute_farfield=True,
-                    farfield_frequency=FREQUENCY,
+                    farfield_frequency=frequency_hz,
                     farfield_angular_step_deg=args.angular_step,
                     verbose=False,
                 )
                 objective = RobustGainObjective(
                     space,
-                    target_frequency=FREQUENCY,
+                    target_frequency=frequency_hz,
                     pattern_mode=args.pattern,
                     target_theta_deg=args.target_theta,
                     target_phi_deg=args.target_phi,
@@ -731,6 +869,7 @@ def run_campaign(args: argparse.Namespace) -> None:
                     turn_case,
                     seed,
                     progress.count,
+                    frequency_hz,
                     simulation_metadata,
                 )
                 summary.update(

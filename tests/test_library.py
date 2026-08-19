@@ -13,6 +13,7 @@ import numpy as np
 from emerge_loaded_antenna import (
     AntennaDesign,
     CoilDesign,
+    CONVERGENCE_SCHEMA_VERSION,
     DesignSpace,
     DesignVariable,
     EvaluationRecord,
@@ -215,7 +216,7 @@ class DesignTests(unittest.TestCase):
         )
         open_region = OpenRegionSettings()
         payload = {
-            "schema_version": 1,
+            "schema_version": CONVERGENCE_SCHEMA_VERSION,
             "passed": True,
             "frequency_hz": 868e6,
             "design_fingerprint": design_fingerprint(design),
@@ -256,7 +257,7 @@ class DesignTests(unittest.TestCase):
         mesh = MeshSettings(wavelength_resolution=0.33)
         open_region = OpenRegionSettings()
         payload = {
-            "schema_version": 1,
+            "schema_version": CONVERGENCE_SCHEMA_VERSION,
             "passed": True,
             "frequency_hz": 868e6,
             "design_fingerprint": design_fingerprint(design),
@@ -354,6 +355,8 @@ class DesignTests(unittest.TestCase):
 
         self.assertEqual(score, -4.0)
         self.assertEqual(objective.best_record.metrics["worst_s11_db"], -10.5)
+        self.assertEqual(objective.best_record.metrics["s11_low_db"], -12.0)
+        self.assertEqual(objective.best_record.metrics["s11_high_db"], -10.5)
 
 
 if __name__ == "__main__":

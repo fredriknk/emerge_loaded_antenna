@@ -1,4 +1,4 @@
-"""Fine-mesh, fine-angle verification of an optimizer result."""
+"""Fine-mesh, fine-angle verification at an inferred or requested frequency."""
 
 from __future__ import annotations
 
@@ -17,15 +17,14 @@ import numpy as np
 from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
-    REFERENCE_868MHZ_DESIGN_PATH,
+    REFERENCE_DESIGN_FREQUENCY_HZ,
     SOLVER_CHOICES,
     SimulationOptions,
     SimulationResult,
     load_design,
+    load_reference_design,
     simulate,
 )
-
-FREQUENCY = 868e6
 
 
 def gain_db(farfield) -> np.ndarray:
@@ -33,12 +32,12 @@ def gain_db(farfield) -> np.ndarray:
     return 20*np.log10(np.maximum(amplitude, 1e-12))
 
 
-def result_summary(result: SimulationResult) -> dict:
+def result_summary(result: SimulationResult, frequency_hz: float) -> dict:
     pattern = result.farfield_metrics
     if pattern is None:
         raise RuntimeError("verification far field was not computed")
     return {
-        "s11_at_868_db": result.s11_db_at(FREQUENCY),
+        "s11_at_target_db": result.s11_db_at(frequency_hz),
         "worst_s11_db": float(np.max(result.s11_db)),
         "best_s11_db": float(np.min(result.s11_db)),
         "peak_gain_dbi": pattern.peak_gain_dbi,
@@ -68,9 +67,12 @@ def result_summary(result: SimulationResult) -> dict:
     }
 
 
-def print_summary(name: str, summary: dict) -> None:
+def print_summary(name: str, summary: dict, frequency_hz: float) -> None:
     print(f"\n{name.upper()} VERIFICATION")
-    print(f"S11 at 868 MHz  : {summary['s11_at_868_db']:.3f} dB")
+    print(
+        f"S11 at {frequency_hz/1e6:g} MHz: "
+        f"{summary['s11_at_target_db']:.3f} dB"
+    )
     print(f"Worst sweep S11 : {summary['worst_s11_db']:.3f} dB")
     print(f"Peak gain       : {summary['peak_gain_dbi']:.3f} dBi")
     print(
@@ -95,13 +97,17 @@ def print_summary(name: str, summary: dict) -> None:
     )
 
 
-def save_plots(result: SimulationResult, output: Path) -> None:
+def save_plots(
+    result: SimulationResult,
+    output: Path,
+    frequency_hz: float,
+) -> None:
     output.mkdir(parents=True, exist_ok=True)
     frequency_mhz = result.frequencies/1e6
     fig, axis = plt.subplots(figsize=(8, 4.5))
     axis.plot(frequency_mhz, result.s11_db, marker="o")
     axis.axhline(-10.0, color="tab:red", linestyle="--", label="-10 dB limit")
-    axis.axvline(868.0, color="0.5", linestyle=":")
+    axis.axvline(frequency_hz/1e6, color="0.5", linestyle=":")
     axis.set(xlabel="Frequency (MHz)", ylabel="S11 (dB)", title="Verified S11")
     axis.grid(True, alpha=0.35)
     axis.legend()
@@ -125,7 +131,7 @@ def save_plots(result: SimulationResult, output: Path) -> None:
     polar.savefig(output/"horizon_gain.png", dpi=180)
     plt.close(polar)
 
-    field = result.raw_data.field.find(freq=FREQUENCY)
+    field = result.raw_data.field.find(freq=frequency_hz)
     faces = result.artifacts.farfield_selection
     origin = result.artifacts.farfield_origin
     points = max(361, int(round(360/result.options.farfield_angular_step_deg)) + 1)
@@ -161,7 +167,7 @@ def save_plots(result: SimulationResult, output: Path) -> None:
     axis.set(
         xlabel="Cut angle (degrees)",
         ylabel="Realized gain (dBi)",
-        title="Verified principal-plane gain at 868 MHz",
+        title=f"Verified principal-plane gain at {frequency_hz/1e6:g} MHz",
     )
     axis.grid(True, alpha=0.35)
     axis.legend()
@@ -192,14 +198,20 @@ def options(
     angular_step: float,
     points: int,
     solver: str,
+    frequency_hz: float,
+    sweep_bandwidth_hz: float,
 ) -> SimulationOptions:
     return SimulationOptions(
-        sweep=FrequencySweep(center=FREQUENCY, span=30e6, points=points),
+        sweep=FrequencySweep(
+            center=frequency_hz,
+            span=sweep_bandwidth_hz,
+            points=points,
+        ),
         mesh=mesh,
         solve=True,
         solver=solver,
         compute_farfield=True,
-        farfield_frequency=FREQUENCY,
+        farfield_frequency=frequency_hz,
         farfield_angular_step_deg=angular_step,
         verbose=True,
     )
@@ -211,11 +223,19 @@ def parse_args() -> argparse.Namespace:
         "result",
         nargs="?",
         type=Path,
-        default=REFERENCE_868MHZ_DESIGN_PATH,
         help=(
-            "design or optimizer result (default: tracked 868 MHz reference "
-            "design)"
+            "design or optimizer result; defaults to a generated reference"
         ),
+    )
+    parser.add_argument(
+        "--frequency-mhz",
+        type=float,
+        help="target frequency; inferred from optimizer output when possible",
+    )
+    parser.add_argument(
+        "--sweep-bandwidth-mhz",
+        type=float,
+        help="verification sweep span; defaults to wavelength-scaled 30 MHz",
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--angular-step", type=float, default=0.5)
@@ -229,10 +249,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-coarse", action="store_true")
     parser.add_argument("--show-3d", action="store_true")
     args = parser.parse_args()
+    if args.frequency_mhz is not None and (
+        not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0
+    ):
+        parser.error("--frequency-mhz must be finite and positive")
+    if args.sweep_bandwidth_mhz is not None and (
+        not np.isfinite(args.sweep_bandwidth_mhz)
+        or args.sweep_bandwidth_mhz <= 0
+    ):
+        parser.error("--sweep-bandwidth-mhz must be finite and positive")
     if args.frequency_points < 3 or args.frequency_points % 2 == 0:
         parser.error("--frequency-points must be an odd integer of at least 3")
     if args.output is None:
-        if args.result == REFERENCE_868MHZ_DESIGN_PATH:
+        if args.result is None:
             args.output = Path("optimization_results/reference_design_verification")
         else:
             args.output = args.result.parent/(args.result.stem + "_verification")
@@ -241,18 +270,52 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    design = load_design(args.result)
+    source_frequency = None
+    if args.result is not None:
+        source_payload = json.loads(args.result.read_text(encoding="utf-8"))
+        if isinstance(source_payload, dict):
+            source_frequency = source_payload.get("frequency_hz")
+    if args.frequency_mhz is not None:
+        frequency_hz = args.frequency_mhz*1e6
+    elif source_frequency is not None:
+        frequency_hz = float(source_frequency)
+    else:
+        frequency_hz = REFERENCE_DESIGN_FREQUENCY_HZ
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0:
+        raise SystemExit("Design metadata contains an invalid frequency_hz")
+    sweep_bandwidth_hz = (
+        args.sweep_bandwidth_mhz*1e6
+        if args.sweep_bandwidth_mhz is not None
+        else 30e6*frequency_hz/REFERENCE_DESIGN_FREQUENCY_HZ
+    )
+    if args.result is None:
+        design = load_reference_design(frequency_hz)
+        source = "generated wavelength-scaled reference"
+    else:
+        design = load_design(args.result)
+        source = str(args.result.resolve())
     args.output.mkdir(parents=True, exist_ok=True)
-    payload = {"source": str(args.result.resolve()), "design": asdict(design)}
+    payload = {
+        "source": source,
+        "frequency_hz": frequency_hz,
+        "design": asdict(design),
+    }
     coarse_result = None
 
     if not args.skip_coarse:
         coarse_result = simulate(
             design,
-            options(MeshSettings(), 2.0, args.frequency_points, args.solver),
+            options(
+                MeshSettings(),
+                2.0,
+                args.frequency_points,
+                args.solver,
+                frequency_hz,
+                sweep_bandwidth_hz,
+            ),
         )
-        payload["coarse"] = result_summary(coarse_result)
-        print_summary("coarse", payload["coarse"])
+        payload["coarse"] = result_summary(coarse_result, frequency_hz)
+        print_summary("coarse", payload["coarse"], frequency_hz)
 
     fine_mesh = MeshSettings(
         wire_sections=8,
@@ -266,10 +329,17 @@ def main() -> None:
     )
     fine_result = simulate(
         design,
-        options(fine_mesh, args.angular_step, args.frequency_points, args.solver),
+        options(
+            fine_mesh,
+            args.angular_step,
+            args.frequency_points,
+            args.solver,
+            frequency_hz,
+            sweep_bandwidth_hz,
+        ),
     )
-    payload["fine"] = result_summary(fine_result)
-    print_summary("fine", payload["fine"])
+    payload["fine"] = result_summary(fine_result, frequency_hz)
+    print_summary("fine", payload["fine"], frequency_hz)
 
     if coarse_result is not None:
         coarse = payload["coarse"]
@@ -279,7 +349,9 @@ def main() -> None:
             "horizon_p10_delta_db": (
                 fine["horizon_p10_gain_dbi"] - coarse["horizon_p10_gain_dbi"]
             ),
-            "s11_868_delta_db": fine["s11_at_868_db"] - coarse["s11_at_868_db"],
+            "s11_target_delta_db": (
+                fine["s11_at_target_db"] - coarse["s11_at_target_db"]
+            ),
         }
         payload["convergence"] = convergence
         print("\nMESH CONVERGENCE (fine - coarse)")
@@ -290,7 +362,7 @@ def main() -> None:
 
     report_path = args.output/"verification.json"
     report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    save_plots(fine_result, args.output)
+    save_plots(fine_result, args.output, frequency_hz)
     print(f"\nVerification report: {report_path.resolve()}")
     print(f"Plots              : {args.output.resolve()}")
     if args.show_3d:

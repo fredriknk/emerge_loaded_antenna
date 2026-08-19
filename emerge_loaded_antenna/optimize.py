@@ -436,7 +436,9 @@ class RobustGainObjective:
                 - self.gain_weight*useful_gain
             )
             metrics = {
+                "s11_low_db": float(result.s11_db[0]),
                 "center_s11_db": s11_center,
+                "s11_high_db": float(result.s11_db[-1]),
                 "worst_s11_db": worst_s11,
                 "useful_gain_dbi": float(useful_gain),
                 "peak_gain_dbi": result.peak_gain_dbi,

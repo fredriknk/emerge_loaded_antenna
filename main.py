@@ -19,17 +19,17 @@ from emerge_loaded_antenna import (
     MeshSettings,
     SOLVER_CHOICES,
     SimulationOptions,
-    load_reference_868mhz_design,
+    load_reference_design,
     simulate,
 )
 
 MHz = 1e6
-
-
-# Tracked, known-convergent optimizer seed shared by all examples.
-DESIGN = load_reference_868mhz_design()
-
 F0 = 868*MHz
+
+
+# Tracked example geometry evaluated at this script's target frequency.
+DESIGN = load_reference_design(F0)
+
 RUN_SOLVER = True
 SHOW_GEOMETRY = True
 SHOW_COIL_PREVIEW = False

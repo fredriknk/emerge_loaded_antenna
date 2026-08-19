@@ -1,18 +1,51 @@
-"""Tracked antenna designs suitable for examples and optimizer warm starts."""
+"""Frequency-scalable reference geometry for examples and numerical checks."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+import math
 from pathlib import Path
 
 from .config import AntennaDesign
 from .serialization import load_design
 
 
-REFERENCE_868MHZ_DESIGN_PATH = (
-    Path(__file__).resolve().parent/"data"/"868mhz_reference_design.json"
+REFERENCE_DESIGN_FREQUENCY_HZ = 868e6
+REFERENCE_DESIGN_PATH = (
+    Path(__file__).resolve().parent/"data"/"reference_design.json"
 )
 
 
-def load_reference_868mhz_design() -> AntennaDesign:
-    """Load the known-convergent two-coil 868 MHz reference design."""
-    return load_design(REFERENCE_868MHZ_DESIGN_PATH)
+def scale_design(design: AntennaDesign, factor: float) -> AntennaDesign:
+    """Scale every physical length while retaining angles and impedance."""
+    if not math.isfinite(factor) or factor <= 0:
+        raise ValueError("design scale factor must be finite and positive")
+    scaled = replace(
+        design,
+        wire_radius=design.wire_radius*factor,
+        radial_length=design.radial_length*factor,
+        straight_lengths=tuple(value*factor for value in design.straight_lengths),
+        coils=tuple(
+            replace(
+                coil,
+                radius=coil.radius*factor,
+                pitch=coil.pitch*factor,
+                transition=coil.transition*factor,
+                transition_offset=coil.transition_offset*factor,
+            )
+            for coil in design.coils
+        ),
+        port_height=design.port_height*factor,
+    )
+    scaled.validate()
+    return scaled
+
+
+def load_reference_design(
+    frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
+) -> AntennaDesign:
+    """Load the reference geometry at any frequency by wavelength scaling."""
+    if not math.isfinite(frequency_hz) or frequency_hz <= 0:
+        raise ValueError("reference frequency must be finite and positive")
+    reference = load_design(REFERENCE_DESIGN_PATH)
+    return scale_design(reference, REFERENCE_DESIGN_FREQUENCY_HZ/frequency_hz)

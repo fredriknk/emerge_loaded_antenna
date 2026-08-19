@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import AntennaDesign, MeshSettings, OpenRegionSettings
 
-CONVERGENCE_SCHEMA_VERSION = 1
+CONVERGENCE_SCHEMA_VERSION = 2
 
 
 def design_fingerprint(design: AntennaDesign) -> str:
@@ -100,17 +100,17 @@ def load_convergence_certificate(path: str | Path) -> dict[str, Any]:
 
 def validate_convergence_certificate(
     path: str | Path,
-    design: AntennaDesign,
+    reference_design: AntennaDesign,
     mesh: MeshSettings,
     open_region: OpenRegionSettings,
     frequency_hz: float,
 ) -> dict[str, Any]:
-    """Ensure a passing certificate covers this baseline and configuration."""
+    """Ensure a certificate covers this numerical reference and configuration."""
     payload = load_convergence_certificate(path)
-    if payload.get("design_fingerprint") != design_fingerprint(design):
+    if payload.get("design_fingerprint") != design_fingerprint(reference_design):
         raise RuntimeError(
             "The convergence certificate was generated for a different "
-            "warm-start antenna design."
+            "numerical reference design."
         )
     certified_frequency = payload.get("frequency_hz")
     if not isinstance(certified_frequency, (int, float)) or not math.isclose(
