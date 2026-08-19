@@ -163,23 +163,30 @@ Before the optimization timer starts, the script checks
 or does not match the warm-start design and numerical settings, it
 automatically runs seven isolated solves that vary Huygens clearance, ABC
 distance, and air-mesh resolution. Optimization starts only after those checks
-pass. The certificate is reused on later runs with matching inputs.
+pass. The certificate is reused on later runs with matching inputs. A fresh
+clone warm-starts from the tracked, known-convergent design at
+`emerge_loaded_antenna/data/868mhz_reference_design.json`.
 
 The convergence campaign can also be run explicitly:
 
 ```powershell
-.\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
-    .\optimization_results\best_result.json
+.\.venv\Scripts\python.exe -u .\examples\check_open_region.py
 ```
 
 `--no-auto-convergence` restores fail-fast behavior when a pre-generated report
 is required by an automated workflow. `--skip-convergence-check` remains an
 explicit escape hatch for experiments, but such gain values are not certified.
 
-After preflight, the recommended campaign warm-starts from
-`optimization_results/best_result.json`, runs four independent
-differential-evolution populations, and divides the requested time budget
-between them.
+After preflight, the recommended campaign runs four independent
+differential-evolution populations and divides the requested time budget
+between them. To continue from one of your own saved winners, pass it
+explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12 `
+    --warm-start `
+    .\optimization_results\robust_YYYYMMDD_HHMMSS\campaign_best.json
+```
 
 The wall-time conversion assumes roughly eight seconds per robust evaluation;
 override it with `--seconds-per-eval` if the live ETA on your machine settles

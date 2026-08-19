@@ -23,6 +23,7 @@ from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
     OpenRegionSettings,
+    REFERENCE_868MHZ_DESIGN_PATH,
     SOLVER_CHOICES,
     SimulationOptions,
     design_fingerprint,
@@ -255,8 +256,11 @@ def parse_args() -> argparse.Namespace:
         "result",
         nargs="?",
         type=Path,
-        default=Path("optimization_results/best_result.json"),
-        help="optimizer result containing the representative antenna design",
+        default=REFERENCE_868MHZ_DESIGN_PATH,
+        help=(
+            "representative design or optimizer result (default: tracked "
+            "868 MHz reference design)"
+        ),
     )
     parser.add_argument(
         "--output",

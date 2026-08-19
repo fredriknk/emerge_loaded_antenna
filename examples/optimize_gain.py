@@ -27,6 +27,7 @@ from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
     OpenRegionSettings,
+    REFERENCE_868MHZ_DESIGN_PATH,
     RobustGainObjective,
     SOLVER_CHOICES,
     SimulationOptions,
@@ -383,7 +384,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warm-start",
         type=Path,
-        default=Path("optimization_results/best_result.json"),
+        default=REFERENCE_868MHZ_DESIGN_PATH,
+        help=(
+            "design or optimizer-result JSON (default: tracked 868 MHz "
+            "reference design)"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -477,12 +482,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_baseline(path: Path) -> AntennaDesign:
-    if path.exists():
-        design = load_design(path)
-        print(f"Warm start      : {path.resolve()}")
-        return design
-    print(f"Warm start      : {path} not found; using library defaults")
-    return AntennaDesign()
+    if not path.is_file():
+        raise SystemExit(
+            "WARM START FAILED\n"
+            f"Design file not found: {path}\n"
+            "Pass an existing design or optimizer-result JSON with --warm-start."
+        )
+    design = load_design(path)
+    print(f"Warm start      : {path.resolve()}")
+    return design
 
 
 def iterations_per_run(

@@ -15,51 +15,19 @@ import emerge as em
 from emerge.plot import plot_ff, plot_sp, smith
 
 from emerge_loaded_antenna import (
-    AntennaDesign,
-    CoilDesign,
     FrequencySweep,
     MeshSettings,
     SOLVER_CHOICES,
     SimulationOptions,
+    load_reference_868mhz_design,
     simulate,
 )
 
-mm = 1e-3
 MHz = 1e6
 
 
-# Winner from optimization_results/robust_20260818_211230/campaign_best.json.
-DESIGN = AntennaDesign(
-    wire_radius=1.0*mm,
-    radial_length=0.11351407822319767,
-    radial_angle_deg=29.282203531097146,
-    radial_count=4,
-    straight_lengths=(
-        0.08484335404758198,
-        0.13553510350164583,
-        0.10071453385203444,
-    ),
-    coils=(
-        CoilDesign(
-            radius=0.01187641496751313,
-            turns=1,
-            pitch=0.005829661698094601,
-            transition=6*mm,
-            transition_offset=4.75*mm,
-            handedness="RH",
-        ),
-        CoilDesign(
-            radius=0.007377593599307462,
-            turns=1,
-            pitch=0.009140078375031589,
-            transition=6*mm,
-            transition_offset=4.75*mm,
-            handedness="RH",
-        ),
-    ),
-    port_height=2*mm,
-    port_impedance=50.0,
-)
+# Tracked, known-convergent optimizer seed shared by all examples.
+DESIGN = load_reference_868mhz_design()
 
 F0 = 868*MHz
 RUN_SOLVER = True

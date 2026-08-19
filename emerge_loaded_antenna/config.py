@@ -58,7 +58,9 @@ class AntennaDesign:
     """Complete physical antenna design.
 
     ``N`` coils are interleaved with exactly ``N + 1`` straight sections.
-    Defaults reproduce the two-coil working example in :mod:`main`.
+    Defaults provide a generic two-coil geometry. Use
+    :func:`emerge_loaded_antenna.load_reference_868mhz_design` for the tracked,
+    convergence-tested optimizer seed used by the examples.
     """
 
     wire_radius: float = 1e-3

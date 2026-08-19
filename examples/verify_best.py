@@ -17,6 +17,7 @@ import numpy as np
 from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
+    REFERENCE_868MHZ_DESIGN_PATH,
     SOLVER_CHOICES,
     SimulationOptions,
     SimulationResult,
@@ -210,7 +211,11 @@ def parse_args() -> argparse.Namespace:
         "result",
         nargs="?",
         type=Path,
-        default=Path("optimization_results/best_result.json"),
+        default=REFERENCE_868MHZ_DESIGN_PATH,
+        help=(
+            "design or optimizer result (default: tracked 868 MHz reference "
+            "design)"
+        ),
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--angular-step", type=float, default=0.5)
@@ -227,7 +232,10 @@ def parse_args() -> argparse.Namespace:
     if args.frequency_points < 3 or args.frequency_points % 2 == 0:
         parser.error("--frequency-points must be an odd integer of at least 3")
     if args.output is None:
-        args.output = args.result.parent/(args.result.stem + "_verification")
+        if args.result == REFERENCE_868MHZ_DESIGN_PATH:
+            args.output = Path("optimization_results/reference_design_verification")
+        else:
+            args.output = args.result.parent/(args.result.stem + "_verification")
     return args
 
 

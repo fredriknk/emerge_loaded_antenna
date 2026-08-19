@@ -36,6 +36,7 @@ from .optimize import (
     RobustGainObjective,
     S11Objective,
 )
+from .presets import REFERENCE_868MHZ_DESIGN_PATH, load_reference_868mhz_design
 from .simulation import (
     FarFieldMetrics,
     ModelArtifacts,
@@ -62,6 +63,7 @@ __all__ = [
     "MeshSettings",
     "ModelArtifacts",
     "RobustGainObjective",
+    "REFERENCE_868MHZ_DESIGN_PATH",
     "OPEN_REGION_MODES",
     "OpenRegionSettings",
     "SOLVER_CHOICES",
@@ -73,6 +75,7 @@ __all__ = [
     "design_fingerprint",
     "design_from_dict",
     "load_design",
+    "load_reference_868mhz_design",
     "load_convergence_certificate",
     "save_design",
     "selected_open_region_configuration",

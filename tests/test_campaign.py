@@ -13,12 +13,15 @@ from emerge_loaded_antenna import (
     EvaluationRecord,
     MeshSettings,
     OpenRegionSettings,
+    REFERENCE_868MHZ_DESIGN_PATH,
+    load_reference_868mhz_design,
 )
 from examples.optimize_gain import (
     CampaignProgress,
     design_for_coil_count,
     ensure_convergence_certificate,
     iterations_per_run,
+    load_baseline,
     make_space,
     parse_args,
     parse_turn_cases,
@@ -26,6 +29,23 @@ from examples.optimize_gain import (
 
 
 class CampaignTests(unittest.TestCase):
+    def test_fresh_clone_uses_tracked_reference_design(self):
+        with patch("sys.argv", ["optimize_gain.py"]):
+            args = parse_args()
+
+        self.assertEqual(args.warm_start, REFERENCE_868MHZ_DESIGN_PATH)
+        self.assertTrue(args.warm_start.is_file())
+        self.assertEqual(
+            load_baseline(args.warm_start),
+            load_reference_868mhz_design(),
+        )
+
+    def test_missing_warm_start_does_not_silently_change_design(self):
+        with TemporaryDirectory() as temporary:
+            missing = Path(temporary)/"missing.json"
+            with self.assertRaisesRegex(SystemExit, "WARM START FAILED"):
+                load_baseline(missing)
+
     def test_twelve_hour_budget_is_split_across_seeds(self):
         args = Namespace(
             maxiter=None,
@@ -83,7 +103,7 @@ class CampaignTests(unittest.TestCase):
             root = Path(temporary)
             args = Namespace(
                 convergence_report=root/"convergence.json",
-                warm_start=root/"best_result.json",
+                warm_start=root/"campaign_best.json",
                 output=root/"campaign",
                 solver="auto",
                 no_auto_convergence=False,
@@ -117,7 +137,7 @@ class CampaignTests(unittest.TestCase):
     def test_matching_certificate_is_reused_without_subprocess(self):
         args = Namespace(
             convergence_report=Path("convergence.json"),
-            warm_start=Path("best_result.json"),
+            warm_start=Path("campaign_best.json"),
             output=Path("campaign"),
             solver="auto",
             no_auto_convergence=False,
@@ -143,7 +163,7 @@ class CampaignTests(unittest.TestCase):
     def test_no_auto_convergence_preserves_fail_fast_behavior(self):
         args = Namespace(
             convergence_report=Path("missing.json"),
-            warm_start=Path("best_result.json"),
+            warm_start=Path("campaign_best.json"),
             output=Path("campaign"),
             solver="auto",
             no_auto_convergence=True,

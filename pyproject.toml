@@ -20,3 +20,6 @@ test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 include = ["emerge_loaded_antenna*"]
+
+[tool.setuptools.package-data]
+emerge_loaded_antenna = ["data/*.json"]
