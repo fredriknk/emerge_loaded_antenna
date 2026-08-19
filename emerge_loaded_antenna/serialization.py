@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -15,34 +15,25 @@ def _coil_from_value(value: Any) -> CoilDesign:
     if isinstance(value, CoilDesign):
         return value
     if isinstance(value, Mapping):
-        return CoilDesign(**dict(value))
+        data = dict(value)
+        allowed = {item.name for item in fields(CoilDesign)}
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValueError(
+                "unsupported CoilDesign fields: " + ", ".join(sorted(unknown))
+            )
+        return CoilDesign(**data)
     raise ValueError("each coil must be a CoilDesign or JSON object")
 
 
 def design_from_dict(values: Mapping[str, Any]) -> AntennaDesign:
     """Construct and validate a design from an ``asdict``-style mapping."""
     data = dict(values)
-    legacy_fields = {
-        "bottom_length",
-        "middle_length",
-        "top_length",
-        "coil1",
-        "coil2",
-    }
-    if "straight_lengths" not in data and legacy_fields & data.keys():
-        missing = legacy_fields - data.keys()
-        if missing:
-            raise ValueError(
-                "legacy two-coil design is missing: " + ", ".join(sorted(missing))
-            )
-        data["straight_lengths"] = (
-            data.pop("bottom_length"),
-            data.pop("middle_length"),
-            data.pop("top_length"),
-        )
-        data["coils"] = (
-            _coil_from_value(data.pop("coil1")),
-            _coil_from_value(data.pop("coil2")),
+    allowed = {item.name for item in fields(AntennaDesign)}
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(
+            "unsupported AntennaDesign fields: " + ", ".join(sorted(unknown))
         )
     if "straight_lengths" in data:
         lengths = data["straight_lengths"]

@@ -144,7 +144,7 @@ objective = S11Objective(space, target_frequency=868e6)
 score = objective(space.initial_vector)
 ```
 
-`GainMatchObjective` retains the original peak-anywhere objective.
+`GainMatchObjective` optimizes unrestricted peak-anywhere gain.
 `RobustGainObjective` can instead maximize 10th-percentile horizon gain or gain
 in a requested direction while penalizing worst-band mismatch, azimuth ripple,
 deep nulls and excessive height. All objectives retain evaluation history and
@@ -304,39 +304,6 @@ This script instead uses compact cubic Hermite connectors. Each connector
 starts vertically and arrives tangent to the constant-pitch helix. A small
 chord offset controls how far it travels around the coil, independently of
 pitch, so a 6 mm connector no longer creates a broad sweeping elbow.
-
-<!-- Description of the superseded angular-velocity transition:
-The transition uses the quintic smoothstep function:
-
-```text
-S(u) = 10u³ - 15u⁴ + 6u⁵
-```
-
-where:
-
-```text
-u = 0   start of transition
-u = 1   end of transition
-```
-
-The function has zero first and second derivatives at its endpoints.
-
-It is used to smoothly ramp the **angular velocity** of the antenna path from:
-
-```text
-0
-```
-
-for a straight wire to:
-
-```text
-2π / pitch
-```
-
-for the normal helical section.
-
-This means that the generated mathematical path has smooth position, direction, and curvature through the transition.
--->
 
 In practical terms:
 
@@ -558,7 +525,7 @@ than thousands of optimizer evaluations.
 The antenna conductor remains one continuous swept volume. Its path is a
 composite wire of exact straight lines, local transition curves, and three
 Bezier arcs per helical turn. This avoids both coincident-volume PLC errors and
-the excessive triangulation caused by the former global BSpline.
+unnecessary triangulation along straight sections.
 
 `MeshSettings(antenna_size_factor=3.0)` sets the antenna maximum element size
 to three wire radii. This setting is tested with both one- and two-turn coils.
@@ -572,13 +539,8 @@ mesh = MeshSettings(
 )
 ```
 
-The curved-boundary factor is moderate because it no longer has to repair a
-distorted global spline.
-
-With the current example geometry, the old global-spline mesh used 7,595 nodes
-and 54,925 total elements. The composite path uses 3,048 nodes and 22,734
-elements for one-turn coils. Two-turn coils use 3,521 nodes and 26,586
-elements. The script prints current node, total-element, and volume-element
+The curved-boundary factor is moderate because each curved segment is compact
+and local. The script prints current node, total-element, and volume-element
 counts after every mesh build.
 
 Mesh settings strongly affect both simulation accuracy and run time.
@@ -884,27 +846,12 @@ and the outside diameter is approximately:
 ### Transition Length Is Independent of Pitch
 
 The entrance and exit connector lengths are added around the constant-pitch
-portion. They are no longer required to be shorter than `turns * pitch`.
-
-<!-- Superseded total-height example:
-For:
-
-```text
-6 turns
-3 mm pitch
-```
-
-the total coil height remains:
-
-```text
-18 mm
-```
--->
+portion and may be longer than `turns * pitch`.
 
 The two connectors use a small chord allowance set by
-`COIL1_TRANSITION_OFFSET`; the remaining requested rotation uses the specified
-constant pitch. Consequently, connector length can be selected for bend
-quality without imposing a minimum coil pitch. The exact axial height is:
+`CoilDesign.transition_offset`; the remaining requested rotation uses the
+specified constant pitch. Consequently, connector length can be selected for
+bend quality without imposing a minimum coil pitch. The exact axial height is:
 
 ```text
 2 x transition + turns x pitch - join_angle x pitch / pi

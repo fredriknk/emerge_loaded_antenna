@@ -49,11 +49,6 @@ class ModelArtifacts:
     mesh_elements: int
     volume_elements: int
 
-    @property
-    def absorbing_selection(self) -> Any:
-        """Backward-compatible name for the far-field integration surface."""
-        return self.farfield_selection
-
 
 @dataclass(frozen=True)
 class _OpenRegionBounds:

@@ -184,23 +184,19 @@ class DesignTests(unittest.TestCase):
 
         self.assertEqual(restored, original)
 
-    def test_legacy_two_coil_optimizer_result_is_migrated(self):
-        original = AntennaDesign()
-        legacy = {
-            "wire_radius": original.wire_radius,
-            "radial_length": original.radial_length,
-            "radial_angle_deg": original.radial_angle_deg,
-            "radial_count": original.radial_count,
-            "bottom_length": original.straight_lengths[0],
-            "middle_length": original.straight_lengths[1],
-            "top_length": original.straight_lengths[2],
-            "coil1": asdict(original.coils[0]),
-            "coil2": asdict(original.coils[1]),
-            "port_height": original.port_height,
-            "port_impedance": original.port_impedance,
-        }
+    def test_unknown_design_fields_are_rejected(self):
+        values = asdict(AntennaDesign())
+        values["unknown_parameter"] = 1.0
 
-        self.assertEqual(design_from_dict(legacy), original)
+        with self.assertRaisesRegex(ValueError, "unsupported AntennaDesign fields"):
+            design_from_dict(values)
+
+    def test_unknown_coil_fields_are_rejected(self):
+        values = asdict(AntennaDesign())
+        values["coils"][0]["unknown_parameter"] = 1.0
+
+        with self.assertRaisesRegex(ValueError, "unsupported CoilDesign fields"):
+            design_from_dict(values)
 
     def test_straight_section_count_must_match_coils(self):
         design = AntennaDesign(
