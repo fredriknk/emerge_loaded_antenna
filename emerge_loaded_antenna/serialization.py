@@ -2,21 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict
 import json
 from pathlib import Path
-from collections.abc import Sequence
 from typing import Any, Mapping
 
 from .config import AntennaDesign, CoilDesign
-
-_LEGACY_FIELDS = {
-    "bottom_length",
-    "coil1",
-    "middle_length",
-    "coil2",
-    "top_length",
-}
 
 
 def _coil_from_value(value: Any) -> CoilDesign:
@@ -30,37 +22,16 @@ def _coil_from_value(value: Any) -> CoilDesign:
 def design_from_dict(values: Mapping[str, Any]) -> AntennaDesign:
     """Construct and validate a design from an ``asdict``-style mapping."""
     data = dict(values)
-    legacy = _LEGACY_FIELDS.intersection(data)
-    canonical = {"straight_lengths", "coils"}.intersection(data)
-    if legacy and canonical:
-        raise ValueError("cannot mix legacy and variable-length design fields")
-
-    if legacy:
-        defaults = AntennaDesign()
-        straight_lengths = (
-            data.pop("bottom_length", defaults.straight_lengths[0]),
-            data.pop("middle_length", defaults.straight_lengths[1]),
-            data.pop("top_length", defaults.straight_lengths[2]),
-        )
-        coils = (
-            _coil_from_value(data.pop("coil1", defaults.coils[0])),
-            _coil_from_value(data.pop("coil2", defaults.coils[1])),
-        )
-        data["straight_lengths"] = straight_lengths
-        data["coils"] = coils
-    else:
-        if "straight_lengths" in data:
-            lengths = data["straight_lengths"]
-            if isinstance(lengths, (str, bytes)) or not isinstance(
-                lengths, Sequence
-            ):
-                raise ValueError("straight_lengths must be a sequence")
-            data["straight_lengths"] = tuple(lengths)
-        if "coils" in data:
-            coils = data["coils"]
-            if isinstance(coils, (str, bytes)) or not isinstance(coils, Sequence):
-                raise ValueError("coils must be a sequence")
-            data["coils"] = tuple(_coil_from_value(coil) for coil in coils)
+    if "straight_lengths" in data:
+        lengths = data["straight_lengths"]
+        if isinstance(lengths, (str, bytes)) or not isinstance(lengths, Sequence):
+            raise ValueError("straight_lengths must be a sequence")
+        data["straight_lengths"] = tuple(lengths)
+    if "coils" in data:
+        coils = data["coils"]
+        if isinstance(coils, (str, bytes)) or not isinstance(coils, Sequence):
+            raise ValueError("coils must be a sequence")
+        data["coils"] = tuple(_coil_from_value(coil) for coil in coils)
     design = AntennaDesign(**data)
     design.validate()
     return design

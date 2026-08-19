@@ -379,11 +379,7 @@ design is therefore just:
 design = AntennaDesign(straight_lengths=(86e-3,), coils=())
 ```
 
-Add entries to both tuples to create three or more coils. `load_design()` also
-accepts the former fixed `bottom_length`/`coil1`/`middle_length`/`coil2`/
-`top_length` JSON format, so existing optimizer results remain usable. Those
-names also remain available as compatibility aliases in existing two-coil
-Python code; new code should use the tuples so it can change coil count.
+Add entries to both tuples to create three or more coils.
 
 The coil radius is measured to the wire centerline, so its approximate outside
 diameter is `2 * (coil.radius + design.wire_radius)`. Pitch is the axial rise

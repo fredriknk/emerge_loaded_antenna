@@ -7,7 +7,6 @@ optimizers without teaching them about presentation units.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 import math
 
@@ -40,7 +39,7 @@ class CoilDesign:
             raise ValueError("coil handedness must be 'RH' or 'LH'")
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class AntennaDesign:
     """Complete physical antenna design.
 
@@ -59,94 +58,13 @@ class AntennaDesign:
     port_height: float = 2e-3
     port_impedance: float = 50.0
 
-    def __init__(
-        self,
-        wire_radius: float = 1e-3,
-        radial_length: float = 72e-3,
-        radial_angle_deg: float = 45.0,
-        radial_count: int = 4,
-        straight_lengths: Sequence[float] | None = None,
-        coils: Sequence[CoilDesign] | None = None,
-        port_height: float = 2e-3,
-        port_impedance: float = 50.0,
-        *,
-        bottom_length: float | None = None,
-        coil1: CoilDesign | None = None,
-        middle_length: float | None = None,
-        coil2: CoilDesign | None = None,
-        top_length: float | None = None,
-    ) -> None:
-        lengths = tuple(
-            (140e-3, 221e-3, 140e-3)
-            if straight_lengths is None
-            else straight_lengths
-        )
-        coil_items = tuple(
-            (CoilDesign(), CoilDesign()) if coils is None else coils
-        )
-
-        legacy_lengths = (bottom_length, middle_length, top_length)
-        if any(value is not None for value in legacy_lengths):
-            if len(lengths) != 3:
-                raise ValueError(
-                    "legacy length fields require exactly two configured coils"
-                )
-            lengths = tuple(
-                current if replacement is None else replacement
-                for current, replacement in zip(lengths, legacy_lengths)
-            )
-        legacy_coils = (coil1, coil2)
-        if any(coil is not None for coil in legacy_coils):
-            if len(coil_items) != 2:
-                raise ValueError(
-                    "legacy coil fields require exactly two configured coils"
-                )
-            coil_items = tuple(
-                current if replacement is None else replacement
-                for current, replacement in zip(coil_items, legacy_coils)
-            )
-
-        for name, value in (
-            ("wire_radius", wire_radius),
-            ("radial_length", radial_length),
-            ("radial_angle_deg", radial_angle_deg),
-            ("radial_count", radial_count),
-            ("straight_lengths", lengths),
-            ("coils", coil_items),
-            ("port_height", port_height),
-            ("port_impedance", port_impedance),
-        ):
-            object.__setattr__(self, name, value)
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "straight_lengths", tuple(self.straight_lengths))
+        object.__setattr__(self, "coils", tuple(self.coils))
 
     @property
     def coil_count(self) -> int:
         return len(self.coils)
-
-    @property
-    def bottom_length(self) -> float:
-        return self.straight_lengths[0]
-
-    @property
-    def middle_length(self) -> float:
-        if self.coil_count != 2:
-            raise AttributeError("middle_length is only defined for two coils")
-        return self.straight_lengths[1]
-
-    @property
-    def top_length(self) -> float:
-        return self.straight_lengths[-1]
-
-    @property
-    def coil1(self) -> CoilDesign:
-        if self.coil_count < 1:
-            raise AttributeError("coil1 is not defined for a zero-coil design")
-        return self.coils[0]
-
-    @property
-    def coil2(self) -> CoilDesign:
-        if self.coil_count < 2:
-            raise AttributeError("coil2 requires at least two coils")
-        return self.coils[1]
 
     def validate(self) -> None:
         if self.wire_radius <= 0:

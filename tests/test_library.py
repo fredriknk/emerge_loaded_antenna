@@ -118,45 +118,6 @@ class DesignTests(unittest.TestCase):
 
         self.assertEqual(restored, original)
 
-    def test_legacy_two_coil_json_mapping_is_supported(self):
-        coil = asdict(CoilDesign())
-        restored = design_from_dict(
-            {
-                "bottom_length": 0.10,
-                "coil1": coil,
-                "middle_length": 0.20,
-                "coil2": coil,
-                "top_length": 0.30,
-            }
-        )
-
-        self.assertEqual(restored.straight_lengths, (0.10, 0.20, 0.30))
-        self.assertEqual(restored.coil_count, 2)
-
-    def test_legacy_python_fields_remain_usable(self):
-        original = AntennaDesign(
-            bottom_length=0.10,
-            middle_length=0.20,
-            top_length=0.30,
-            coil1=replace(CoilDesign(), turns=2),
-        )
-        changed = replace(
-            original,
-            middle_length=0.25,
-            coil2=replace(original.coil2, pitch=8e-3),
-        )
-        space = DesignSpace(
-            changed,
-            (DesignVariable("coil1.pitch", 4e-3, 10e-3),),
-        )
-        decoded = space.decode((9e-3,))
-
-        self.assertEqual(original.straight_lengths, (0.10, 0.20, 0.30))
-        self.assertEqual(original.coil1.turns, 2)
-        self.assertEqual(changed.middle_length, 0.25)
-        self.assertAlmostEqual(changed.coil2.pitch, 8e-3)
-        self.assertAlmostEqual(decoded.coils[0].pitch, 9e-3)
-
     def test_straight_section_count_must_match_coils(self):
         design = AntennaDesign(
             straight_lengths=(100e-3,),
