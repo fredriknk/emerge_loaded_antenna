@@ -480,6 +480,9 @@ from emerge_loaded_antenna import AntennaDesign, CoilDesign
 
 design = AntennaDesign(
     wire_radius=1.0e-3,
+    radial_length=0.072,
+    radial_angle_deg=45.0,
+    radial_count=4,
     straight_lengths=(0.120, 0.221, 0.150),
     coils=(
         CoilDesign(
