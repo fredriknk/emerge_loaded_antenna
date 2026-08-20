@@ -402,19 +402,19 @@ def build_model(
         ).foreground()
     )
     feed.max_meshsize = mesh.feed_size_factor*design.wire_radius
-
-    hub_radius = 4*design.wire_radius
-    hub_height = 3*design.wire_radius
+    mm = 1e-3
+    hub_radius = 1.95*mm/2+design.wire_radius*2#4*design.wire_radius
+    hub_height = 6*mm#3*design.wire_radius
     ground_hub = em.geo.Cylinder(
         hub_radius,
         hub_height,
         cs=em.GCS.displace(0.0, 0.0, -hub_height),
-        Nsections=max(24, mesh.wire_sections),
+        Nsections=mesh.wire_sections,#max(24, mesh.wire_sections),
         name="GroundHub",
     )
     ground_hub.max_meshsize = mesh.feed_size_factor*design.wire_radius
 
-    radial_start = 3*design.wire_radius
+    radial_start =hub_radius-design.wire_radius
     if design.radial_length <= radial_start:
         raise ValueError("radial_length must exceed three wire radii")
     radial_tilt = 90.0 + design.radial_angle_deg
@@ -439,15 +439,23 @@ def build_model(
             (0.0, 0.0, 1.0),
             index*360.0/design.radial_count,
         )
+        
+        em.geo.translate(
+            radial,
+            dz=-hub_height+design.wire_radius*2,
+        )
+
         radial = radial.set_material(em.lib.MET_COPPER).foreground()
         radial.max_meshsize = mesh.radial_size_factor*design.wire_radius
         radials.append(radial)
-
+    
+    
     ground_system = (
         em.geo.unite(ground_hub, *radials)
         .set_material(em.lib.MET_COPPER)
         .foreground()
     )
+    
     ground_system.max_meshsize = mesh.radial_size_factor*design.wire_radius
 
     wavelength = C0/options.sweep.center
