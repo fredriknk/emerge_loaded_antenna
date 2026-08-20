@@ -1,31 +1,31 @@
 {
-  "wire_radius": 0.001,
-  "radial_length": 0.11351407822319767,
-  "radial_angle_deg": 29.282203531097146,
-  "radial_count": 4,
-  "straight_lengths": [
-    0.08484335404758198,
-    0.13553510350164583,
-    0.10071453385203444
-  ],
-  "coils": [
-    {
-      "radius": 0.01187641496751313,
-      "turns": 1,
-      "pitch": 0.005829661698094601,
-      "transition": 0.006,
-      "transition_offset": 0.00475,
-      "handedness": "RH"
-    },
-    {
-      "radius": 0.007377593599307462,
-      "turns": 1,
-      "pitch": 0.009140078375031589,
-      "transition": 0.006,
-      "transition_offset": 0.00475,
-      "handedness": "RH"
-    }
-  ],
-  "port_height": 0.002,
-  "port_impedance": 50.0
-}
+    "wire_radius": 0.001,
+    "radial_length": 0.11835875886794944,
+    "radial_angle_deg": 30.116935985992047,
+    "radial_count": 4,
+    "straight_lengths": [
+      0.0962912948655547,
+      0.07530057626080644,
+      0.11226568100841988
+    ],
+    "coils": [
+      {
+        "radius": 0.014994952864835962,
+        "turns": 1,
+        "pitch": 0.007457187656049569,
+        "transition": 0.006,
+        "transition_offset": 0.00475,
+        "handedness": "RH"
+      },
+      {
+        "radius": 0.00976107960783077,
+        "turns": 1,
+        "pitch": 0.006089726971539542,
+        "transition": 0.006,
+        "transition_offset": 0.00475,
+        "handedness": "RH"
+      }
+    ],
+    "port_height": 0.002,
+    "port_impedance": 50.0
+  }
