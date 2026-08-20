@@ -17,6 +17,7 @@ dependencies = [
 optimize = ["scipy>=1.12"]
 verify = ["matplotlib>=3.8"]
 test = ["pytest>=8"]
+drawing = ["matplotlib>=3.8"]
 
 [tool.setuptools.packages.find]
 include = ["emerge_loaded_antenna*"]

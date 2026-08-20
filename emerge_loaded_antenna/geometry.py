@@ -152,7 +152,7 @@ class AntennaPath:
         turns = int(coil.turns)
         pitch = coil.pitch
         transition = coil.transition
-        transition_offset = coil.transition_offset
+        transition_offset = coil.transition*19/24
         sign = 1.0 if coil.handedness.upper() == "RH" else -1.0
         omega = sign*2*np.pi/pitch
         alpha = sign*2*np.arcsin(transition_offset/(2*radius))

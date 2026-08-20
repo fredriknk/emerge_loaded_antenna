@@ -455,7 +455,7 @@ def build_model(
         .set_material(em.lib.MET_COPPER)
         .foreground()
     )
-    
+
     ground_system.max_meshsize = mesh.radial_size_factor*design.wire_radius
 
     wavelength = C0/options.sweep.center
