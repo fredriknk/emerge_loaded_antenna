@@ -24,17 +24,23 @@ from emerge_loaded_antenna import (
 )
 
 MHz = 1e6
-F0 = 868*MHz
+mm = 1e-3
+F0 = 869.5*MHz
 
 
 # Tracked example geometry evaluated at this script's target frequency.
 DESIGN = load_reference_design(F0)
 
-RUN_SOLVER = True
-SHOW_GEOMETRY = True
+DESIGN = replace(
+    DESIGN,
+    wire_radius=0.0008,
+)
+
+RUN_SOLVER = False
+SHOW_GEOMETRY = False
 SHOW_COIL_PREVIEW = False
 SHOW_MESH = True
-SHOW_3D_FARFIELD = True
+SHOW_3D_FARFIELD = False
 FARFIELD_DB_FLOOR = -30.0
 
 OPTIONS = SimulationOptions(
