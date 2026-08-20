@@ -49,7 +49,9 @@ The package is intended for:
 Run these commands from the repository root. The `.venv` folder is local to
 this project and is ignored by git.
 
-On Windows PowerShell:
+Download python 3.12 or 3.13 from [python.com/downloads](https://www.python.org/downloads/)
+
+Windows PowerShell:
 
 ```powershell
 py -3.13 -m venv .venv
@@ -73,14 +75,6 @@ python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[optimize,verify]"
-```
-
-If Python 3.13 is not installed but you have `uv`, let `uv` create the
-environment:
-
-```powershell
-uv venv .venv --python 3.13 --seed
-.\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify]"
 ```
 
 ## Library API
@@ -222,7 +216,8 @@ mismatched, it runs seven isolated solves that vary Huygens clearance, ABC
 distance, and air-mesh resolution. This preflight uses a wavelength-scaled
 numerical reference problem, independently of the user's starting antenna, so
 poor initial S11 or gain cannot block a new search. A passing certificate is
-reused for later runs with matching frequency and numerical settings.
+reused for later runs with matching frequency, numerical settings, and
+far-field angular grid.
 
 If the automatic comparison fails, the default is to print a prominent
 warning, record `convergence_status: "warning"` in every result, and continue
@@ -247,10 +242,11 @@ available; otherwise it warns and continues, or aborts when combined with
 `--require-convergence`. `--skip-convergence-check` bypasses even certificate
 validation and cannot be combined with strict mode.
 
-After preflight, the recommended campaign runs four independent
-differential-evolution populations and divides the requested time budget
-between them. To continue from one of your own saved winners, pass it
-explicitly:
+After preflight, a broad campaign runs four independent differential-evolution
+populations and divides the requested candidate budget between them. A
+fine-tune campaign defaults to two seeds so each local population receives
+more generations. `--seeds` overrides either default. To continue from one of
+your own saved winners, pass it explicitly:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12 `
@@ -258,9 +254,11 @@ explicitly:
     .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json
 ```
 
-The wall-time conversion assumes roughly eight seconds per robust evaluation;
+The wall-time conversion assumes roughly eight seconds per candidate;
 override it with `--seconds-per-eval` if the live ETA on your machine settles
-substantially higher or lower.
+substantially higher or lower. Apparent new incumbents are confirmed with
+three simulations by default, so `--hours` remains an estimate. Progress and
+result files report optimizer candidates and physical simulations separately.
 
 The broad search optimizes every straight length, one pitch and radius shared
 by all coils, radial length, and radial angle. Thus a design with N >= 1 coils
@@ -314,6 +312,51 @@ No topology flag is needed for that second stage: the coil and turn counts are
 inferred from the saved winner. `--finetune` can also be applied directly to a
 multi-topology campaign, but the larger populations make that substantially
 more expensive.
+
+Fine-tuning is deliberately local rather than a second global search. Each
+initial and restarted population contains 50% candidates within 3% of the
+confirmed incumbent in normalized bound space, 30% within 10%, and 20% global
+samples. The incumbent itself is retained exactly. Fine-tune differential
+evolution uses mutation dithering from 0.20 to 0.60 and recombination 0.30.
+After ten generations without a confirmed 0.05-point improvement, the
+remaining candidate budget is restarted around the best feasible design. For
+short runs, that patience is reduced to at most half the available DE
+generations so the restart can actually occur. Terminal output reports true
+generations, stagnation and normalized population diversity.
+
+One whole population batch is reserved for a bounded normalized coordinate
+search around as many as three confirmed feasible elites. If none exists, the
+same budget explores around the best confirmed result instead of being
+discarded. This local stage replaces SciPy's generic polishing in `--finetune`;
+`--polish` still controls broad searches. The total optimizer-candidate budget
+remains unchanged across DE restarts and local search.
+
+Every would-be incumbent is synchronously repeated before its score is
+returned to differential evolution. A lone far-field spike is excluded by the
+three-run consensus, while an inconsistent candidate is quarantined rather
+than becoming the mutation anchor. The objective also gives a small default
+reward for worst-band S11 margin between -10 and -12 dB instead of treating
+every passing match as identical. Checkpoints and topology rankings prefer a
+confirmed design satisfying all hard constraints before comparing scalar
+scores. The main controls are:
+
+```text
+--confirmation-runs 3
+--confirmation-score-tolerance 1.0
+--s11-margin-target-db -12
+--s11-margin-weight 0.10
+--restart-stagnation-generations 10
+--restart-min-improvement 0.05
+--local-search-evaluations 24
+```
+
+Fine-tune radii, mutation, recombination and local-search step sizes are also
+available as command-line options. Set
+`--restart-stagnation-generations 0` to disable only stagnation-triggered
+restarts; early SciPy convergence can still restart the population to spend the
+remaining budget. A campaign output directory is single-use, and the script
+refuses to start in a nonempty directory because resume semantics are not
+implemented.
 
 Coil turns are discontinuous geometry choices and are therefore separate
 searches rather than rounded continuous variables. Mixed coil counts and turn

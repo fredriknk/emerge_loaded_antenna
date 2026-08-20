@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
 import json
+import unittest
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
 
 from emerge_loaded_antenna import (
+    CONVERGENCE_SCHEMA_VERSION,
+    SOLVER_CHOICES,
     AntennaDesign,
     CoilDesign,
-    CONVERGENCE_SCHEMA_VERSION,
     DesignSpace,
     DesignVariable,
     EvaluationRecord,
@@ -22,7 +23,6 @@ from emerge_loaded_antenna import (
     MeshSettings,
     OpenRegionSettings,
     RobustGainObjective,
-    SOLVER_CHOICES,
     SimulationOptions,
     build_centerline,
     build_model,
@@ -32,6 +32,30 @@ from emerge_loaded_antenna import (
     validate_convergence_certificate,
 )
 from emerge_loaded_antenna.simulation import _configure_solver
+
+
+def _robust_result(
+    useful_gain_dbi: float = 4.0,
+    s11_db: tuple[float, float, float] = (-12.0, -11.0, -10.5),
+):
+    pattern = SimpleNamespace(
+        horizon_p10_gain_dbi=useful_gain_dbi,
+        horizon_min_gain_dbi=3.0,
+        horizon_mean_gain_dbi=useful_gain_dbi + 0.2,
+        horizon_ripple_p90_p10_db=1.0,
+        peak_theta_deg=90.0,
+        peak_phi_deg=0.0,
+    )
+    values = np.asarray(s11_db, dtype=float)
+    return SimpleNamespace(
+        peak_gain_dbi=useful_gain_dbi,
+        farfield_metrics=pattern,
+        frequencies=np.array((863e6, 868e6, 873e6)),
+        s11_db=values,
+        s11_db_at=lambda frequency: float(values[1]),
+        antenna_height=0.55,
+        gain_db_at=lambda theta, phi: useful_gain_dbi,
+    )
 
 
 class DesignTests(unittest.TestCase):
@@ -259,6 +283,7 @@ class DesignTests(unittest.TestCase):
             "schema_version": CONVERGENCE_SCHEMA_VERSION,
             "passed": True,
             "frequency_hz": 868e6,
+            "farfield_angular_step_deg": 2.0,
             "design_fingerprint": design_fingerprint(design),
             "selected_configuration": selected_open_region_configuration(
                 mesh, open_region
@@ -288,7 +313,17 @@ class DesignTests(unittest.TestCase):
                 mesh,
                 open_region,
                 868e6,
+                farfield_angular_step_deg=2.0,
             )
+            with self.assertRaisesRegex(RuntimeError, "angular step"):
+                validate_convergence_certificate(
+                    path,
+                    design,
+                    mesh,
+                    open_region,
+                    868e6,
+                    farfield_angular_step_deg=4.0,
+                )
 
         self.assertTrue(restored["passed"])
 
@@ -390,13 +425,213 @@ class DesignTests(unittest.TestCase):
         )
         objective = RobustGainObjective(space)
 
-        with patch("emerge_loaded_antenna.optimize.simulate", return_value=fake_result):
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            return_value=fake_result,
+        ) as simulation:
             score = objective((220e-3,))
 
         self.assertEqual(score, -4.0)
+        simulation.assert_called_once()
+        self.assertEqual(
+            objective.best_record.confirmation_status,
+            "not_requested",
+        )
         self.assertEqual(objective.best_record.metrics["worst_s11_db"], -10.5)
         self.assertEqual(objective.best_record.metrics["s11_low_db"], -12.0)
         self.assertEqual(objective.best_record.metrics["s11_high_db"], -10.5)
+
+    def test_robust_objective_rewards_worst_band_s11_margin_to_target(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        cases = (
+            ((-12.0, -11.0, -10.0), 0.0),
+            ((-13.0, -12.0, -11.0), 1.0),
+            ((-15.0, -14.0, -13.0), 2.0),
+        )
+
+        for pattern_mode in ("horizon", "directional", "peak"):
+            for s11_values, expected_margin in cases:
+                with self.subTest(
+                    pattern_mode=pattern_mode,
+                    s11_values=s11_values,
+                ):
+                    objective = RobustGainObjective(
+                        space,
+                        pattern_mode=pattern_mode,
+                        s11_margin_target_db=-12.0,
+                        s11_margin_weight=0.5,
+                    )
+                    with patch(
+                        "emerge_loaded_antenna.optimize.simulate",
+                        return_value=_robust_result(s11_db=s11_values),
+                    ):
+                        score = objective((220e-3,))
+
+                    expected_reward = 0.5*expected_margin
+                    self.assertAlmostEqual(score, -4.0 - expected_reward)
+                    self.assertAlmostEqual(
+                        objective.best_record.metrics["s11_margin_db"],
+                        expected_margin,
+                    )
+                    self.assertAlmostEqual(
+                        objective.best_record.metrics["s11_margin_reward"],
+                        expected_reward,
+                    )
+
+    def test_robust_objective_confirms_and_quarantines_new_incumbents(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        reported = []
+        confirmations = []
+        objective = RobustGainObjective(
+            space,
+            confirmation_runs=3,
+            confirmation_score_tolerance=0.5,
+            on_evaluation=reported.append,
+            on_confirmation=confirmations.append,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            side_effect=(
+                _robust_result(4.0),
+                _robust_result(4.2),
+                _robust_result(4.1),
+            ),
+        ) as simulation:
+            confirmed_score = objective((220e-3,))
+
+        self.assertAlmostEqual(confirmed_score, -4.1)
+        self.assertEqual(simulation.call_count, 3)
+        self.assertEqual(len(objective.history), 1)
+        self.assertEqual(objective.history[0].simulation_runs, 3)
+        self.assertEqual(objective.simulation_evaluations, 3)
+        self.assertEqual(reported, objective.history)
+        self.assertEqual(len(confirmations), 1)
+        self.assertEqual(confirmations[0].status, "confirmed")
+        self.assertEqual(len(confirmations[0].records), 3)
+        self.assertEqual(objective.best_record.confirmation_status, "confirmed")
+        self.assertAlmostEqual(
+            objective.best_record.metrics["confirmation_confirmed_score"],
+            -4.1,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            side_effect=(
+                _robust_result(30.0),
+                _robust_result(3.0),
+                _robust_result(3.0),
+            ),
+        ) as simulation:
+            quarantined_score = objective((221e-3,))
+
+        self.assertAlmostEqual(quarantined_score, -3.0)
+        self.assertEqual(simulation.call_count, 3)
+        self.assertEqual(len(objective.history), 2)
+        self.assertEqual(len(reported), 2)
+        self.assertEqual(len(confirmations), 2)
+        self.assertEqual(confirmations[-1].status, "confirmed_with_outliers")
+        self.assertAlmostEqual(confirmations[-1].confirmed_score, -3.0)
+        self.assertEqual(confirmations[-1].outlier_runs, 1)
+        self.assertIsNone(confirmations[-1].reason)
+        self.assertEqual(
+            objective.history[-1].confirmation_status,
+            "confirmed_with_outliers",
+        )
+        self.assertIsNone(objective.history[-1].error)
+        self.assertIs(objective.best_record, objective.history[0])
+        self.assertEqual(objective.simulation_evaluations, 6)
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            side_effect=(
+                _robust_result(30.0),
+                _robust_result(3.0),
+                _robust_result(2.0),
+            ),
+        ) as simulation:
+            quarantined_score = objective((222e-3,))
+
+        self.assertEqual(quarantined_score, objective.failure_penalty)
+        self.assertEqual(simulation.call_count, 3)
+        self.assertEqual(len(objective.history), 3)
+        self.assertEqual(len(reported), 3)
+        self.assertEqual(len(confirmations), 3)
+        self.assertEqual(confirmations[-1].status, "quarantined")
+        self.assertIn("agreed with the median", confirmations[-1].reason)
+        self.assertEqual(
+            objective.history[-1].confirmation_status,
+            "quarantined",
+        )
+        self.assertIsNotNone(objective.history[-1].error)
+        self.assertIs(objective.best_record, objective.history[0])
+        self.assertEqual(objective.simulation_evaluations, 9)
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            return_value=_robust_result(3.0),
+        ) as simulation:
+            objective((223e-3,))
+
+        simulation.assert_called_once()
+        self.assertEqual(
+            objective.history[-1].confirmation_status,
+            "not_needed",
+        )
+        self.assertEqual(len(reported), 4)
+        self.assertEqual(len(confirmations), 3)
+        self.assertEqual(objective.simulation_evaluations, 10)
+
+    def test_robust_objective_validates_confirmation_and_margin_settings(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "positive odd integer"):
+            RobustGainObjective(space, confirmation_runs=2)
+        with self.assertRaisesRegex(ValueError, "below maximum_s11_db"):
+            RobustGainObjective(space, s11_margin_target_db=-9.0)
+        with self.assertRaisesRegex(ValueError, "maximum_s11_db must be finite"):
+            RobustGainObjective(space, maximum_s11_db=float("nan"))
+
+    def test_robust_objective_confirms_new_best_feasible_candidate(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        infeasible = _robust_result(30.0, (-9.0, -9.0, -9.0))
+        feasible = _robust_result(4.0, (-12.0, -11.0, -10.5))
+        objective = RobustGainObjective(
+            space,
+            confirmation_runs=3,
+            confirmation_score_tolerance=0.5,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            side_effect=(infeasible, infeasible, infeasible),
+        ):
+            infeasible_score = objective((220e-3,))
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            side_effect=(feasible, feasible, feasible),
+        ) as simulation:
+            feasible_score = objective((221e-3,))
+
+        self.assertLess(infeasible_score, feasible_score)
+        self.assertIs(objective.best_record, objective.history[0])
+        self.assertIs(objective.best_feasible_record, objective.history[1])
+        self.assertEqual(objective.history[1].confirmation_status, "confirmed")
+        self.assertEqual(objective.history[1].simulation_runs, 3)
+        self.assertEqual(objective.simulation_evaluations, 6)
+        self.assertEqual(simulation.call_count, 3)
 
 
 if __name__ == "__main__":

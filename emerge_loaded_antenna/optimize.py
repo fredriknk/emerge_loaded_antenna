@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Callable, Literal, Mapping, Sequence
+from typing import Literal
 
 import numpy as np
 
@@ -181,9 +182,47 @@ class EvaluationRecord:
     peak_gain_dbi: float | None
     error: str | None = None
     metrics: Mapping[str, float] = field(default_factory=dict)
+    confirmation_status: Literal[
+        "not_requested",
+        "not_needed",
+        "confirmed",
+        "confirmed_with_outliers",
+        "quarantined",
+    ] = "not_requested"
+    simulation_runs: int = 1
 
 
 EvaluationCallback = Callable[[EvaluationRecord], None]
+
+
+@dataclass(frozen=True)
+class IncumbentConfirmation:
+    """Details from repeating a candidate that appeared to be a new best.
+
+    Confirmation runs are deliberately kept out of the normal evaluation
+    history and progress callback.  This report exposes their raw records for
+    diagnostics without making one optimizer evaluation look like several.
+    """
+
+    vector: tuple[float, ...]
+    status: Literal[
+        "confirmed",
+        "confirmed_with_outliers",
+        "quarantined",
+    ]
+    requested_runs: int
+    successful_runs: int
+    preliminary_score: float
+    confirmed_score: float | None
+    score_spread: float | None
+    consensus_runs: int
+    outlier_runs: int
+    incumbent_score: float | None
+    records: tuple[EvaluationRecord, ...]
+    reason: str | None = None
+
+
+ConfirmationCallback = Callable[[IncumbentConfirmation], None]
 
 
 def _best_record(history: Sequence[EvaluationRecord]) -> EvaluationRecord | None:
@@ -246,6 +285,7 @@ class S11Objective:
         if self.on_evaluation is not None:
             self.on_evaluation(record)
         return float(score)
+
 
 class GainMatchObjective:
     """Minimize mismatch penalty while maximizing peak isotropic gain."""
@@ -341,6 +381,8 @@ class RobustGainObjective:
         target_phi_deg: float = 0.0,
         maximum_s11_db: float = -10.0,
         mismatch_weight: float = 2.0,
+        s11_margin_target_db: float | None = None,
+        s11_margin_weight: float = 0.0,
         gain_weight: float = 1.0,
         maximum_horizon_ripple_db: float = 1.5,
         ripple_weight: float = 0.15,
@@ -351,6 +393,9 @@ class RobustGainObjective:
         options: SimulationOptions | None = None,
         failure_penalty: float = 1_000.0,
         on_evaluation: EvaluationCallback | None = None,
+        confirmation_runs: int = 1,
+        confirmation_score_tolerance: float = 1.0,
+        on_confirmation: ConfirmationCallback | None = None,
     ):
         if pattern_mode not in {"horizon", "directional", "peak"}:
             raise ValueError("invalid pattern_mode")
@@ -360,15 +405,39 @@ class RobustGainObjective:
             raise ValueError("maximum_height must be positive")
         weights = (
             mismatch_weight,
+            s11_margin_weight,
             gain_weight,
             ripple_weight,
             null_weight,
             height_weight,
         )
-        if any(weight < 0 for weight in weights):
-            raise ValueError("objective weights must be non-negative")
+        if any(not np.isfinite(weight) or weight < 0 for weight in weights):
+            raise ValueError("objective weights must be finite and non-negative")
         if maximum_horizon_ripple_db < 0:
             raise ValueError("maximum_horizon_ripple_db must be non-negative")
+        if not np.isfinite(maximum_s11_db):
+            raise ValueError("maximum_s11_db must be finite")
+        if s11_margin_target_db is not None:
+            if not np.isfinite(s11_margin_target_db):
+                raise ValueError("s11_margin_target_db must be finite")
+            if s11_margin_target_db >= maximum_s11_db:
+                raise ValueError(
+                    "s11_margin_target_db must be below maximum_s11_db"
+                )
+        if (
+            not isinstance(confirmation_runs, (int, np.integer))
+            or isinstance(confirmation_runs, bool)
+            or confirmation_runs < 1
+            or confirmation_runs % 2 == 0
+        ):
+            raise ValueError("confirmation_runs must be a positive odd integer")
+        if (
+            not np.isfinite(confirmation_score_tolerance)
+            or confirmation_score_tolerance < 0
+        ):
+            raise ValueError(
+                "confirmation_score_tolerance must be finite and non-negative"
+            )
         self.space = space
         self.target_frequency = target_frequency
         self.pattern_mode = pattern_mode
@@ -376,6 +445,8 @@ class RobustGainObjective:
         self.target_phi_deg = target_phi_deg
         self.maximum_s11_db = maximum_s11_db
         self.mismatch_weight = mismatch_weight
+        self.s11_margin_target_db = s11_margin_target_db
+        self.s11_margin_weight = s11_margin_weight
         self.gain_weight = gain_weight
         self.maximum_horizon_ripple_db = maximum_horizon_ripple_db
         self.ripple_weight = ripple_weight
@@ -402,14 +473,48 @@ class RobustGainObjective:
         )
         self.failure_penalty = float(failure_penalty)
         self.on_evaluation = on_evaluation
+        self.confirmation_runs = int(confirmation_runs)
+        self.confirmation_score_tolerance = float(
+            confirmation_score_tolerance
+        )
+        self.on_confirmation = on_confirmation
         self.history: list[EvaluationRecord] = []
+        self.confirmation_history: list[IncumbentConfirmation] = []
+        self.simulation_evaluations = 0
 
     @property
     def best_record(self) -> EvaluationRecord | None:
         return _best_record(self.history)
 
-    def __call__(self, vector: Sequence[float]) -> float:
-        values = tuple(float(value) for value in vector)
+    def _is_feasible(self, record: EvaluationRecord) -> bool:
+        if record.error is not None or not np.isfinite(record.score):
+            return False
+        worst_s11 = record.metrics.get("worst_s11_db")
+        if (
+            worst_s11 is None
+            or not np.isfinite(worst_s11)
+            or worst_s11 > self.maximum_s11_db
+        ):
+            return False
+        return all(
+            record.metrics.get(name, float("inf")) <= 0.0
+            for name in (
+                "mismatch_penalty",
+                "pattern_penalty",
+                "height_penalty",
+            )
+        )
+
+    @property
+    def best_feasible_record(self) -> EvaluationRecord | None:
+        return min(
+            (record for record in self.history if self._is_feasible(record)),
+            key=lambda record: record.score,
+            default=None,
+        )
+
+    def _evaluate_once(self, values: tuple[float, ...]) -> EvaluationRecord:
+        self.simulation_evaluations += 1
         try:
             design = self.space.decode(values)
             result = simulate(design, self.options)
@@ -421,6 +526,18 @@ class RobustGainObjective:
             worst_s11 = float(np.max(result.s11_db))
             mismatch = np.maximum(0.0, result.s11_db - self.maximum_s11_db)
             mismatch_penalty = self.mismatch_weight*float(np.mean(mismatch**2))
+            s11_margin_reward = 0.0
+            s11_margin_db = 0.0
+            if self.s11_margin_target_db is not None:
+                available_margin = (
+                    self.maximum_s11_db - self.s11_margin_target_db
+                )
+                s11_margin_db = float(np.clip(
+                    self.maximum_s11_db - worst_s11,
+                    0.0,
+                    available_margin,
+                ))
+                s11_margin_reward = self.s11_margin_weight*s11_margin_db
 
             if self.pattern_mode == "horizon":
                 useful_gain = pattern.horizon_p10_gain_dbi
@@ -457,8 +574,11 @@ class RobustGainObjective:
                 mismatch_penalty
                 + pattern_penalty
                 + height_penalty
+                - s11_margin_reward
                 - self.gain_weight*useful_gain
             )
+            if not np.isfinite(score):
+                raise RuntimeError("objective score was not finite")
             metrics = {
                 "s11_low_db": float(result.s11_db[0]),
                 "center_s11_db": s11_center,
@@ -474,9 +594,13 @@ class RobustGainObjective:
                 "horizon_ripple_db": pattern.horizon_ripple_p90_p10_db,
                 "antenna_height_m": result.antenna_height,
                 "mismatch_penalty": mismatch_penalty,
+                "s11_margin_db": s11_margin_db,
+                "s11_margin_reward": s11_margin_reward,
                 "pattern_penalty": pattern_penalty,
                 "height_penalty": height_penalty,
             }
+            if self.s11_margin_target_db is not None:
+                metrics["s11_margin_target_db"] = self.s11_margin_target_db
             metrics.update(
                 {
                     f"s11_{frequency/1e6:g}_mhz_db": float(s11_value)
@@ -494,15 +618,150 @@ class RobustGainObjective:
                 metrics=metrics,
             )
         except Exception as error:
-            score = self.failure_penalty
             record = EvaluationRecord(
                 values,
-                score,
+                self.failure_penalty,
                 None,
                 None,
                 f"{type(error).__name__}: {error}",
             )
+        return record
+
+    @staticmethod
+    def _representative_record(
+        records: Sequence[EvaluationRecord],
+    ) -> EvaluationRecord:
+        """Return the real repeat at the conservative median score."""
+
+        if not records:
+            raise ValueError("cannot aggregate an empty confirmation")
+        ordered = sorted(records, key=lambda record: record.score)
+        # The upper middle is deliberately conservative if failed runs leave
+        # an even number of usable repeats.
+        return ordered[len(ordered)//2]
+
+    def _confirm_incumbent(
+        self,
+        preliminary: EvaluationRecord,
+        incumbent: EvaluationRecord | None,
+    ) -> EvaluationRecord:
+        records = [preliminary]
+        records.extend(
+            self._evaluate_once(preliminary.vector)
+            for _ in range(self.confirmation_runs - 1)
+        )
+        successful = [record for record in records if record.error is None]
+        scores = np.asarray([record.score for record in successful], dtype=float)
+        combined = self._representative_record(successful)
+        confirmed_score = combined.score
+        score_spread = float(np.ptp(scores)) if scores.size else None
+        failed_runs = len(records) - len(successful)
+        consensus_runs = int(
+            np.count_nonzero(
+                np.abs(scores - confirmed_score)
+                <= self.confirmation_score_tolerance
+            )
+        )
+        outlier_runs = len(successful) - consensus_runs
+        required_consensus = self.confirmation_runs//2 + 1
+
+        reason = None
+        if failed_runs:
+            reason = (
+                f"{failed_runs} of {self.confirmation_runs} confirmation "
+                "simulations failed"
+            )
+        elif consensus_runs < required_consensus:
+            reason = (
+                f"only {consensus_runs} of {self.confirmation_runs} scores "
+                "agreed with the median within tolerance "
+                f"{self.confirmation_score_tolerance:.6g}"
+            )
+
+        confirmation_metrics = {
+            "confirmation_requested_runs": float(self.confirmation_runs),
+            "confirmation_successful_runs": float(len(successful)),
+            "confirmation_preliminary_score": preliminary.score,
+            "confirmation_confirmed_score": float(confirmed_score),
+            "confirmation_score_min": float(np.min(scores)),
+            "confirmation_score_max": float(np.max(scores)),
+            "confirmation_score_spread": float(score_spread),
+            "confirmation_score_tolerance": self.confirmation_score_tolerance,
+            "confirmation_consensus_runs": float(consensus_runs),
+            "confirmation_outlier_runs": float(outlier_runs),
+            "confirmation_consistent": float(reason is None),
+            "confirmation_quarantined": float(reason is not None),
+        }
+        if incumbent is not None:
+            confirmation_metrics["confirmation_incumbent_score"] = incumbent.score
+
+        if reason is None:
+            status: Literal[
+                "confirmed",
+                "confirmed_with_outliers",
+                "quarantined",
+            ] = (
+                "confirmed_with_outliers" if outlier_runs else "confirmed"
+            )
+            record = replace(
+                combined,
+                metrics={**combined.metrics, **confirmation_metrics},
+                confirmation_status=status,
+                simulation_runs=self.confirmation_runs,
+            )
+        else:
+            quarantine_score = self.failure_penalty
+            if incumbent is not None:
+                quarantine_score = max(
+                    quarantine_score,
+                    float(np.nextafter(incumbent.score, np.inf)),
+                )
+            confirmation_metrics["confirmation_returned_score"] = quarantine_score
+            record = replace(
+                combined,
+                score=quarantine_score,
+                error=f"ConfirmationError: quarantined candidate; {reason}",
+                metrics={**combined.metrics, **confirmation_metrics},
+                confirmation_status="quarantined",
+                simulation_runs=self.confirmation_runs,
+            )
+            status = "quarantined"
+
+        report = IncumbentConfirmation(
+            vector=preliminary.vector,
+            status=status,
+            requested_runs=self.confirmation_runs,
+            successful_runs=len(successful),
+            preliminary_score=preliminary.score,
+            confirmed_score=confirmed_score,
+            score_spread=score_spread,
+            consensus_runs=consensus_runs,
+            outlier_runs=outlier_runs,
+            incumbent_score=None if incumbent is None else incumbent.score,
+            records=tuple(records),
+            reason=reason,
+        )
+        self.confirmation_history.append(report)
+        if self.on_confirmation is not None:
+            self.on_confirmation(report)
+        return record
+
+    def __call__(self, vector: Sequence[float]) -> float:
+        values = tuple(float(value) for value in vector)
+        record = self._evaluate_once(values)
+        incumbent = self.best_record
+        feasible_incumbent = self.best_feasible_record
+        if self.confirmation_runs > 1 and record.error is None:
+            is_new_overall = incumbent is None or record.score < incumbent.score
+            is_new_feasible = self._is_feasible(record) and (
+                feasible_incumbent is None
+                or record.score < feasible_incumbent.score
+            )
+            if is_new_overall or is_new_feasible:
+                record = self._confirm_incumbent(record, incumbent)
+            else:
+                record = replace(record, confirmation_status="not_needed")
         self.history.append(record)
         if self.on_evaluation is not None:
             self.on_evaluation(record)
-        return float(score)
+        return float(record.score)

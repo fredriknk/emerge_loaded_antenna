@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, replace
-from datetime import datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
+from pathlib import Path
 
 os.environ.setdefault("EMERGE_STD_LOGLEVEL", "ERROR")
 
@@ -20,11 +20,11 @@ import numpy as np
 
 from emerge_loaded_antenna import (
     CONVERGENCE_SCHEMA_VERSION,
+    REFERENCE_DESIGN_FREQUENCY_HZ,
+    SOLVER_CHOICES,
     FrequencySweep,
     MeshSettings,
     OpenRegionSettings,
-    REFERENCE_DESIGN_FREQUENCY_HZ,
-    SOLVER_CHOICES,
     SimulationOptions,
     design_fingerprint,
     load_design,
@@ -474,6 +474,7 @@ def main() -> None:
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "passed": passed,
         "frequency_hz": args.frequency_hz,
+        "farfield_angular_step_deg": args.angular_step,
         "source": source_label,
         "design_fingerprint": design_fingerprint(design),
         "design": asdict(design),

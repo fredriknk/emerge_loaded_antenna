@@ -9,14 +9,14 @@ if _venv_mkl is not None:
     os.environ.setdefault("EMERGE_PARDISO_PATH", str(_venv_mkl))
 
 from .config import (
-    AntennaDesign,
     ABC_TYPES,
+    OPEN_REGION_MODES,
+    SOLVER_CHOICES,
+    AntennaDesign,
     CoilDesign,
     FrequencySweep,
     MeshSettings,
-    OPEN_REGION_MODES,
     OpenRegionSettings,
-    SOLVER_CHOICES,
     SimulationOptions,
 )
 from .convergence import (
@@ -28,11 +28,13 @@ from .convergence import (
 )
 from .geometry import AntennaPath, CompositeCurve, build_centerline
 from .optimize import (
+    ConfirmationCallback,
     DesignSpace,
     DesignVariable,
     EvaluationCallback,
     EvaluationRecord,
     GainMatchObjective,
+    IncumbentConfirmation,
     RobustGainObjective,
     S11Objective,
 )
@@ -42,6 +44,7 @@ from .presets import (
     load_reference_design,
     scale_design,
 )
+from .serialization import design_from_dict, load_design, save_design
 from .simulation import (
     FarFieldMetrics,
     ModelArtifacts,
@@ -49,15 +52,19 @@ from .simulation import (
     build_model,
     simulate,
 )
-from .serialization import design_from_dict, load_design, save_design
 
 __all__ = [
-    "AntennaDesign",
     "ABC_TYPES",
+    "CONVERGENCE_SCHEMA_VERSION",
+    "OPEN_REGION_MODES",
+    "REFERENCE_DESIGN_FREQUENCY_HZ",
+    "REFERENCE_DESIGN_PATH",
+    "SOLVER_CHOICES",
+    "AntennaDesign",
     "AntennaPath",
     "CoilDesign",
     "CompositeCurve",
-    "CONVERGENCE_SCHEMA_VERSION",
+    "ConfirmationCallback",
     "DesignSpace",
     "DesignVariable",
     "EvaluationCallback",
@@ -65,14 +72,11 @@ __all__ = [
     "FarFieldMetrics",
     "FrequencySweep",
     "GainMatchObjective",
+    "IncumbentConfirmation",
     "MeshSettings",
     "ModelArtifacts",
-    "RobustGainObjective",
-    "REFERENCE_DESIGN_FREQUENCY_HZ",
-    "REFERENCE_DESIGN_PATH",
-    "OPEN_REGION_MODES",
     "OpenRegionSettings",
-    "SOLVER_CHOICES",
+    "RobustGainObjective",
     "S11Objective",
     "SimulationOptions",
     "SimulationResult",
@@ -80,12 +84,12 @@ __all__ = [
     "build_model",
     "design_fingerprint",
     "design_from_dict",
+    "load_convergence_certificate",
     "load_design",
     "load_reference_design",
-    "load_convergence_certificate",
     "save_design",
-    "selected_open_region_configuration",
     "scale_design",
+    "selected_open_region_configuration",
     "simulate",
     "validate_convergence_certificate",
 ]

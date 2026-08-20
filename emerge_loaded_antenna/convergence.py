@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import hashlib
 import json
 import math
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +114,7 @@ def validate_convergence_certificate(
     open_region: OpenRegionSettings,
     frequency_hz: float,
     require_passed: bool = True,
+    farfield_angular_step_deg: float | None = None,
 ) -> dict[str, Any]:
     """Ensure a certificate covers this numerical reference and configuration."""
     payload = load_convergence_certificate(path, require_passed=require_passed)
@@ -154,4 +155,16 @@ def validate_convergence_certificate(
             "The optimizer settings do not match the convergence certificate: "
             + "; ".join(mismatches)
         )
+    if farfield_angular_step_deg is not None:
+        certified_step = payload.get("farfield_angular_step_deg")
+        if not isinstance(certified_step, (int, float)) or not math.isclose(
+            float(certified_step),
+            float(farfield_angular_step_deg),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise RuntimeError(
+                "The optimizer far-field angular step does not match the "
+                "convergence certificate."
+            )
     return payload

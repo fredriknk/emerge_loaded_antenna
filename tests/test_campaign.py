@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from argparse import ArgumentTypeError, Namespace
 import csv
 import json
+import unittest
+from argparse import ArgumentTypeError, Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from emerge_loaded_antenna import (
+    REFERENCE_DESIGN_FREQUENCY_HZ,
     AntennaDesign,
     CoilDesign,
     EvaluationRecord,
     MeshSettings,
     OpenRegionSettings,
-    REFERENCE_DESIGN_FREQUENCY_HZ,
     load_reference_design,
 )
 from examples.optimize_gain import (
@@ -23,24 +25,289 @@ from examples.optimize_gain import (
     C0,
     COLLINEAR_SECTION_RANGE_LAMBDA,
     COLLINEAR_SECTION_START_LAMBDA,
-    CampaignProgress,
     MONOPOLE_LENGTH_RANGE_LAMBDA,
+    CampaignProgress,
+    CaseSchedule,
+    GenerationMonitor,
     build_case_schedules,
+    build_finetune_population,
     default_maximum_height,
     design_for_coil_count,
     ensure_convergence_certificate,
     iterations_per_run,
     load_baseline,
     make_space,
+    normalized_pattern_search,
     parse_args,
     parse_coil_counts,
     parse_turn_cases,
     resolve_topology,
+    restart_seed,
     run_campaign,
+    run_finetune_optimizer,
+    split_finetune_budget,
 )
 
 
 class CampaignTests(unittest.TestCase):
+    def test_search_modes_choose_safe_optimizer_defaults(self):
+        with patch("sys.argv", ["optimize_gain.py"]):
+            broad = parse_args()
+        with patch("sys.argv", ["optimize_gain.py", "--finetune"]):
+            fine = parse_args()
+
+        self.assertEqual(broad.seeds, (2, 3, 4, 5))
+        self.assertEqual(fine.seeds, (2, 3))
+        self.assertEqual(fine.confirmation_runs, 3)
+        self.assertEqual(fine.s11_margin_target_db, -12.0)
+        self.assertEqual(fine.s11_margin_weight, 0.10)
+        self.assertEqual(fine.restart_min_improvement, 0.05)
+
+    def test_finetune_population_is_multiscale_bounded_and_reproducible(self):
+        space = make_space(AntennaDesign(), finetune=True)
+        population = build_finetune_population(space, 20, seed=17)
+        repeated = build_finetune_population(space, 20, seed=17)
+        normalized = np.asarray([space.normalize(row) for row in population])
+        center = space.normalize(space.initial_vector)
+
+        np.testing.assert_allclose(population, repeated)
+        np.testing.assert_allclose(population[0], space.initial_vector)
+        self.assertEqual(population.shape, (20, len(space.variables)))
+        self.assertTrue(np.all(np.abs(normalized[1:10] - center) <= 0.03))
+        self.assertTrue(np.all(np.abs(normalized[10:16] - center) <= 0.10))
+        self.assertTrue(np.all((0 <= normalized) & (normalized <= 1)))
+
+    def test_finetune_population_samples_inside_boundary_intersections(self):
+        space = make_space(AntennaDesign(), finetune=True)
+        lower = np.asarray([bound[0] for bound in space.bounds])
+        population = build_finetune_population(
+            space,
+            20,
+            seed=9,
+            center=lower,
+        )
+        normalized = np.asarray([space.normalize(row) for row in population])
+
+        self.assertTrue(np.all(normalized[1:10] >= 0))
+        self.assertTrue(np.all(normalized[1:10] <= 0.03))
+        self.assertFalse(np.any(np.all(normalized[1:10] == 0, axis=1)))
+
+    def test_finetune_budget_reserves_whole_population_batches(self):
+        budget = split_finetune_budget(72 * 21, 72, requested_local=24)
+
+        self.assertEqual(budget.differential_evolution, 72 * 20)
+        self.assertEqual(budget.local_search, 72)
+        self.assertEqual(
+            budget.differential_evolution + budget.local_search,
+            72 * 21,
+        )
+        self.assertEqual(
+            split_finetune_budget(72, 72, requested_local=24).local_search,
+            0,
+        )
+
+    def test_generation_monitor_reports_stagnation_and_diversity(self):
+        objective = SimpleNamespace(history=[])
+        space = make_space(AntennaDesign(), finetune=True)
+        population = build_finetune_population(space, 10, seed=3)
+        monitor = GenerationMonitor(
+            objective,
+            space,
+            "test_run",
+            restart_after=2,
+            incumbent_score=1.0,
+        )
+        intermediate = SimpleNamespace(fun=1.0, population=population)
+
+        self.assertFalse(monitor(intermediate))
+        self.assertTrue(monitor(intermediate))
+        self.assertEqual(monitor.stage_generations, 2)
+        self.assertEqual(monitor.stagnation_generations, 2)
+        self.assertGreater(monitor.last_diversity, 0)
+
+    def test_restart_seeds_are_stable_and_do_not_overlap_adjacent_runs(self):
+        self.assertEqual(restart_seed(2, 1), restart_seed(2, 1))
+        self.assertNotEqual(restart_seed(2, 1), restart_seed(3, 0))
+
+    def test_pattern_search_is_bounded_budgeted_and_improves_feasible_elite(self):
+        space = make_space(design_for_coil_count(AntennaDesign(), 0))
+        start = space.normalize(space.initial_vector)
+        target = np.clip(start + np.asarray((0.08, -0.05, 0.04)), 0, 1)
+
+        class QuadraticObjective:
+            def __init__(self):
+                self.history = []
+                self.simulation_evaluations = 0
+                self(space.initial_vector)
+
+            def __call__(self, vector):
+                normalized = space.normalize(vector)
+                score = float(np.sum((normalized - target) ** 2))
+                record = EvaluationRecord(
+                    tuple(vector),
+                    score,
+                    -12.0,
+                    2.0,
+                    metrics={
+                        "worst_s11_db": -12.0,
+                        "mismatch_penalty": 0.0,
+                        "pattern_penalty": 0.0,
+                        "height_penalty": 0.0,
+                    },
+                )
+                self.history.append(record)
+                self.simulation_evaluations += 1
+                return score
+
+        objective = QuadraticObjective()
+        initial_score = objective.history[0].score
+        stats = normalized_pattern_search(
+            objective,
+            space,
+            -10.0,
+            12,
+            initial_step=0.05,
+            minimum_step=0.005,
+            elite_count=1,
+        )
+
+        self.assertEqual(stats.evaluations, 12)
+        self.assertEqual(stats.simulation_evaluations, 12)
+        self.assertGreater(stats.improvements, 0)
+        self.assertLess(
+            min(record.score for record in objective.history), initial_score
+        )
+        for record in objective.history:
+            normalized = space.normalize(record.vector)
+            self.assertTrue(np.all((0 <= normalized) & (normalized <= 1)))
+
+    def test_pattern_search_spends_budget_without_a_feasible_elite(self):
+        space = make_space(design_for_coil_count(AntennaDesign(), 0))
+
+        class InfeasibleObjective:
+            def __init__(self):
+                self.history = []
+                self.simulation_evaluations = 0
+                self(space.initial_vector)
+
+            def __call__(self, vector):
+                record = EvaluationRecord(
+                    tuple(vector),
+                    1.0,
+                    -9.0,
+                    2.0,
+                    metrics={
+                        "worst_s11_db": -9.0,
+                        "mismatch_penalty": 1.0,
+                        "pattern_penalty": 0.0,
+                        "height_penalty": 0.0,
+                    },
+                )
+                self.history.append(record)
+                self.simulation_evaluations += 1
+                return record.score
+
+        objective = InfeasibleObjective()
+        stats = normalized_pattern_search(
+            objective,
+            space,
+            -10.0,
+            17,
+            initial_step=0.01,
+            minimum_step=0.01,
+            elite_count=3,
+        )
+
+        self.assertEqual(stats.evaluations, 17)
+        self.assertEqual(stats.simulation_evaluations, 17)
+        self.assertEqual(stats.elite_count, 0)
+
+        tiny_step_stats = normalized_pattern_search(
+            objective,
+            space,
+            -10.0,
+            5,
+            initial_step=1e-20,
+            minimum_step=1e-20,
+            elite_count=1,
+        )
+        self.assertEqual(tiny_step_stats.evaluations, 5)
+
+    def test_finetune_runner_restarts_without_exceeding_candidate_budget(self):
+        space = make_space(design_for_coil_count(AntennaDesign(), 0), finetune=True)
+        schedule = CaseSchedule(
+            (), space, maxiter=3, population=5, evaluations_per_run=20
+        )
+
+        class FlatObjective:
+            def __init__(self):
+                self.history = []
+                self.simulation_evaluations = 0
+
+            @property
+            def best_record(self):
+                return min(self.history, key=lambda record: record.score, default=None)
+
+            def __call__(self, vector):
+                record = EvaluationRecord(
+                    tuple(vector),
+                    1.0,
+                    -12.0,
+                    2.0,
+                    metrics={"worst_s11_db": -12.0},
+                )
+                self.history.append(record)
+                self.simulation_evaluations += 1
+                return 1.0
+
+        objective = FlatObjective()
+
+        def fake_de(function, *, init, maxiter, callback, **_kwargs):
+            for row in init:
+                function(row)
+            generations = 0
+            for _ in range(maxiter):
+                for row in init:
+                    function(row)
+                generations += 1
+                if callback(SimpleNamespace(fun=1.0, population=init)):
+                    break
+            return SimpleNamespace(
+                success=False,
+                message="fake",
+                nit=generations,
+            )
+
+        args = Namespace(
+            popsize=1,
+            local_search_evaluations=0,
+            finetune_near_radius=0.03,
+            finetune_wide_radius=0.10,
+            finetune_mutation=(0.2, 0.6),
+            finetune_recombination=0.45,
+            restart_stagnation_generations=1,
+            s11_limit_db=-10.0,
+        )
+        with patch(
+            "examples.optimize_gain.differential_evolution",
+            side_effect=fake_de,
+        ) as optimize:
+            result = run_finetune_optimizer(
+                objective,
+                space,
+                schedule,
+                args,
+                seed=2,
+                run_name="flat",
+            )
+
+        self.assertEqual(len(objective.history), 20)
+        self.assertEqual(result.differential_evolution_evaluations, 20)
+        self.assertEqual(result.restarts, 1)
+        self.assertEqual(result.generations, 2)
+        self.assertEqual(result.effective_stagnation_generations, 1)
+        self.assertEqual(optimize.call_count, 2)
+
     def test_fresh_clone_synthesizes_a_frequency_scaled_design(self):
         with patch("sys.argv", ["optimize_gain.py"]):
             args = parse_args()
@@ -54,19 +321,19 @@ class CampaignTests(unittest.TestCase):
             load_reference_design(args.frequency_hz),
         )
 
-        half_frequency = REFERENCE_DESIGN_FREQUENCY_HZ/2
+        half_frequency = REFERENCE_DESIGN_FREQUENCY_HZ / 2
         scaled = load_baseline(None, half_frequency)
         reference = load_reference_design()
-        self.assertAlmostEqual(scaled.wire_radius, 2*reference.wire_radius)
-        self.assertAlmostEqual(scaled.radial_length, 2*reference.radial_length)
+        self.assertAlmostEqual(scaled.wire_radius, 2 * reference.wire_radius)
+        self.assertAlmostEqual(scaled.radial_length, 2 * reference.radial_length)
         self.assertAlmostEqual(
             sum(scaled.straight_lengths),
-            2*sum(reference.straight_lengths),
+            2 * sum(reference.straight_lengths),
         )
 
     def test_missing_warm_start_does_not_silently_change_design(self):
         with TemporaryDirectory() as temporary:
-            missing = Path(temporary)/"missing.json"
+            missing = Path(temporary) / "missing.json"
             with self.assertRaisesRegex(SystemExit, "WARM START FAILED"):
                 load_baseline(missing, REFERENCE_DESIGN_FREQUENCY_HZ)
 
@@ -81,15 +348,15 @@ class CampaignTests(unittest.TestCase):
         self.assertAlmostEqual(args.match_bandwidth_mhz, 5.0)
         self.assertIsNone(args.maximum_height_mm)
         self.assertAlmostEqual(
-            1e3*default_maximum_height(434e6, 2),
-            1.7*C0/434e6*1e3,
+            1e3 * default_maximum_height(434e6, 2),
+            1.7 * C0 / 434e6 * 1e3,
         )
         self.assertIn("434000000hz", str(args.convergence_report))
         bounds_868 = make_space(load_reference_design(868e6), 868e6).bounds
         bounds_434 = make_space(load_reference_design(434e6), 434e6).bounds
         for first, second in zip(bounds_868[:-1], bounds_434[:-1]):
-            self.assertAlmostEqual(second[0], 2*first[0])
-            self.assertAlmostEqual(second[1], 2*first[1])
+            self.assertAlmostEqual(second[0], 2 * first[0])
+            self.assertAlmostEqual(second[1], 2 * first[1])
         self.assertEqual(bounds_868[-1], bounds_434[-1])
 
     def test_twelve_hour_budget_is_split_across_seeds(self):
@@ -123,24 +390,24 @@ class CampaignTests(unittest.TestCase):
         base = AntennaDesign()
         zero = design_for_coil_count(base, 0)
         three = design_for_coil_count(base, 3)
-        wavelength = C0/REFERENCE_DESIGN_FREQUENCY_HZ
+        wavelength = C0 / REFERENCE_DESIGN_FREQUENCY_HZ
 
         self.assertEqual(zero.coil_count, 0)
         self.assertEqual(len(zero.straight_lengths), 1)
         self.assertAlmostEqual(
             zero.straight_lengths[0],
-            BASE_SECTION_START_LAMBDA*wavelength,
+            BASE_SECTION_START_LAMBDA * wavelength,
         )
         self.assertEqual(three.coil_count, 3)
         self.assertEqual(len(three.straight_lengths), 4)
         self.assertAlmostEqual(
             three.straight_lengths[0],
-            BASE_SECTION_START_LAMBDA*wavelength,
+            BASE_SECTION_START_LAMBDA * wavelength,
         )
         for length in three.straight_lengths[1:]:
             self.assertAlmostEqual(
                 length,
-                COLLINEAR_SECTION_START_LAMBDA*wavelength,
+                COLLINEAR_SECTION_START_LAMBDA * wavelength,
             )
         self.assertEqual(len(make_space(zero).variables), 3)
         self.assertEqual(len(make_space(three).variables), 8)
@@ -148,7 +415,7 @@ class CampaignTests(unittest.TestCase):
 
     def test_electrical_length_priors_are_broad_but_finite(self):
         frequency_hz = REFERENCE_DESIGN_FREQUENCY_HZ
-        wavelength = C0/frequency_hz
+        wavelength = C0 / frequency_hz
         zero = make_space(
             design_for_coil_count(AntennaDesign(), 0, frequency_hz),
             frequency_hz,
@@ -162,10 +429,10 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(
             zero_bounds["straight_lengths.0"],
-            tuple(value*wavelength for value in MONOPOLE_LENGTH_RANGE_LAMBDA),
+            tuple(value * wavelength for value in MONOPOLE_LENGTH_RANGE_LAMBDA),
         )
         expected_loaded = tuple(
-            value*wavelength for value in COLLINEAR_SECTION_RANGE_LAMBDA
+            value * wavelength for value in COLLINEAR_SECTION_RANGE_LAMBDA
         )
         for index in range(4):
             self.assertEqual(
@@ -221,12 +488,8 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(len(broad.variables), 7)
         self.assertEqual(len(fine.variables), 9)
-        self.assertTrue(
-            all(coil.pitch == 8.5e-3 for coil in decoded.coils)
-        )
-        self.assertTrue(
-            all(coil.radius == 12e-3 for coil in decoded.coils)
-        )
+        self.assertTrue(all(coil.pitch == 8.5e-3 for coil in decoded.coils))
+        self.assertTrue(all(coil.radius == 12e-3 for coil in decoded.coils))
         self.assertIn("coils.1.pitch", fine.names)
         self.assertIn("coils.1.radius", fine.names)
 
@@ -284,6 +547,28 @@ class CampaignTests(unittest.TestCase):
         with patch("sys.argv", ["optimize_gain.py", "--finetune"]):
             fine = parse_args()
         self.assertTrue(fine.finetune)
+        self.assertEqual(fine.finetune_near_radius, 0.03)
+        self.assertEqual(fine.finetune_wide_radius, 0.10)
+        self.assertEqual(fine.finetune_mutation, (0.2, 0.6))
+        self.assertEqual(fine.finetune_recombination, 0.30)
+        self.assertEqual(fine.restart_stagnation_generations, 10)
+        self.assertEqual(fine.local_search_evaluations, 24)
+        self.assertEqual(fine.s11_margin_target_db, -12.0)
+        self.assertEqual(fine.s11_margin_weight, 0.10)
+        self.assertEqual(fine.confirmation_runs, 3)
+
+    def test_cli_rejects_nonfinite_objective_and_grid_inputs(self):
+        with (
+            patch("sys.argv", ["optimize_gain.py", "--s11-limit-db", "nan"]),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
+        with (
+            patch("sys.argv", ["optimize_gain.py", "--angular-step", "nan"]),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
 
     def test_cli_builds_multi_coil_topology_campaign(self):
         with patch(
@@ -375,8 +660,11 @@ class CampaignTests(unittest.TestCase):
         )
 
     def test_campaign_executes_and_ranks_every_requested_coil_count(self):
+        objective_options = []
+
         class FakeObjective:
-            def __init__(self, space, *, on_evaluation, **_kwargs):
+            def __init__(self, space, *, on_evaluation, **kwargs):
+                objective_options.append(kwargs)
                 coil_count = space.base.coil_count
                 record = EvaluationRecord(
                     tuple(space.initial_vector),
@@ -394,7 +682,7 @@ class CampaignTests(unittest.TestCase):
                 on_evaluation(record)
 
         with TemporaryDirectory() as temporary:
-            output = Path(temporary)/"campaign"
+            output = Path(temporary) / "campaign"
             with patch(
                 "sys.argv",
                 [
@@ -424,13 +712,25 @@ class CampaignTests(unittest.TestCase):
                 run_campaign(args)
 
             leaderboard = json.loads(
-                (output/"topology_leaderboard.json").read_text(encoding="utf-8")
+                (output / "topology_leaderboard.json").read_text(encoding="utf-8")
             )["topologies"]
             best = json.loads(
-                (output/"campaign_best.json").read_text(encoding="utf-8")
+                (output / "campaign_best.json").read_text(encoding="utf-8")
             )
 
             self.assertEqual(optimize.call_count, 3)
+            self.assertTrue(
+                all(item["confirmation_runs"] == 3 for item in objective_options)
+            )
+            self.assertTrue(
+                all(
+                    item["s11_margin_target_db"] == -12.0
+                    for item in objective_options
+                )
+            )
+            self.assertTrue(
+                all(item["s11_margin_weight"] == 0.10 for item in objective_options)
+            )
             self.assertEqual(
                 [item["coil_count"] for item in leaderboard],
                 [3, 1, 0],
@@ -445,15 +745,11 @@ class CampaignTests(unittest.TestCase):
                 "wavelength_wire_v1",
             )
             self.assertAlmostEqual(
-                best["simulation"]["search_bounds"][
-                    "maximum_height_wavelengths"
-                ],
+                best["simulation"]["search_bounds"]["maximum_height_wavelengths"],
                 2.2,
             )
             self.assertEqual(
-                best["simulation"]["search_bounds"][
-                    "maximum_height_source"
-                ],
+                best["simulation"]["search_bounds"]["maximum_height_source"],
                 "automatic",
             )
 
@@ -475,9 +771,9 @@ class CampaignTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             args = Namespace(
-                convergence_report=root/"convergence.json",
-                warm_start=root/"campaign_best.json",
-                output=root/"campaign",
+                convergence_report=root / "convergence.json",
+                warm_start=root / "campaign_best.json",
+                output=root / "campaign",
                 solver="auto",
                 no_auto_convergence=False,
                 require_convergence=False,
@@ -508,8 +804,9 @@ class CampaignTests(unittest.TestCase):
             self.assertIn("check_open_region.py", command[2])
             self.assertIn("--frequency-mhz", command)
             self.assertIn("--selected-resolution", command)
+            self.assertEqual(command[command.index("--angular-step") + 1], "2")
             self.assertTrue(
-                (args.output/"convergence_reference_design.json").exists()
+                (args.output / "convergence_reference_design.json").exists()
             )
 
     def test_matching_certificate_is_reused_without_subprocess(self):
@@ -597,12 +894,12 @@ class CampaignTests(unittest.TestCase):
     def test_failed_automatic_convergence_warns_or_fails_in_strict_mode(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            common = dict(
-                convergence_report=root/"failed.json",
-                output=root/"campaign",
-                solver="auto",
-                no_auto_convergence=False,
-            )
+            common = {
+                "convergence_report": root / "failed.json",
+                "output": root / "campaign",
+                "solver": "auto",
+                "no_auto_convergence": False,
+            }
             with (
                 patch(
                     "examples.optimize_gain.validate_convergence_certificate",
@@ -646,11 +943,11 @@ class CampaignTests(unittest.TestCase):
     def test_matching_failed_report_warns_without_rerunning_solves(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            report = root/"failed.json"
+            report = root / "failed.json"
             report.write_text("{}", encoding="utf-8")
             args = Namespace(
                 convergence_report=report,
-                output=root/"campaign",
+                output=root / "campaign",
                 solver="auto",
                 no_auto_convergence=False,
                 require_convergence=False,
@@ -689,6 +986,8 @@ class CampaignTests(unittest.TestCase):
                 "worst_s11_db": -10.5,
                 "horizon_p10_gain_dbi": 3.0,
             },
+            confirmation_status="confirmed",
+            simulation_runs=3,
         )
         with TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -704,15 +1003,130 @@ class CampaignTests(unittest.TestCase):
             progress.close()
 
             payload = json.loads(
-                (output/"campaign_best.json").read_text(encoding="utf-8")
+                (output / "campaign_best.json").read_text(encoding="utf-8")
             )
             self.assertEqual(payload["objective"], -3.0)
+            self.assertEqual(payload["evaluations_at_save"], 1)
+            self.assertEqual(payload["simulation_evaluations_at_save"], 3)
+            self.assertEqual(payload["confirmation_status"], "confirmed")
             self.assertEqual(payload["turn_case"], [1, 1])
             self.assertEqual(
                 set(payload["search_space"]["bounds"]),
                 set(space.names),
             )
-            self.assertEqual(len((output/"evaluations.csv").read_text().splitlines()), 2)
+            self.assertEqual(
+                len((output / "evaluations.csv").read_text().splitlines()), 2
+            )
+
+    def test_progress_prefers_confirmed_feasible_checkpoint(self):
+        space = make_space(AntennaDesign())
+        records = (
+            EvaluationRecord(
+                tuple(space.initial_vector),
+                -10.0,
+                -9.0,
+                12.0,
+                metrics={
+                    "worst_s11_db": -9.0,
+                    "mismatch_penalty": 2.0,
+                    "pattern_penalty": 0.0,
+                    "height_penalty": 0.0,
+                },
+                confirmation_status="confirmed",
+            ),
+            EvaluationRecord(
+                tuple(space.initial_vector),
+                -3.0,
+                -12.0,
+                4.0,
+                metrics={
+                    "worst_s11_db": -11.0,
+                    "mismatch_penalty": 0.0,
+                    "pattern_penalty": 0.0,
+                    "height_penalty": 0.0,
+                },
+                confirmation_status="confirmed",
+            ),
+        )
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            progress = CampaignProgress(
+                output,
+                total=2,
+                report_every=10,
+                variable_names=space.names,
+                frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+            )
+            progress.set_context(space, (1, 1), seed=2)
+            for record in records:
+                progress(record)
+            progress.close()
+
+            payload = json.loads(
+                (output / "campaign_best.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["objective"], -3.0)
+            self.assertEqual(payload["metrics"]["worst_s11_db"], -11.0)
+            self.assertTrue(payload["feasible"])
+
+    def test_progress_refuses_to_truncate_an_existing_campaign_log(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            log = output / "evaluations.csv"
+            log.write_text("existing campaign\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "resume is not supported"):
+                CampaignProgress(
+                    output,
+                    total=1,
+                    report_every=1,
+                    variable_names=("straight_lengths.0",),
+                    frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+                )
+
+            self.assertEqual(
+                log.read_text(encoding="utf-8"),
+                "existing campaign\n",
+            )
+
+    def test_progress_refuses_any_nonempty_output_directory(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            best = output / "campaign_best.json"
+            best.write_text('{"existing": true}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "not empty"):
+                CampaignProgress(
+                    output,
+                    total=1,
+                    report_every=1,
+                    variable_names=("straight_lengths.0",),
+                    frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+                )
+
+            self.assertEqual(
+                best.read_text(encoding="utf-8"),
+                '{"existing": true}\n',
+            )
+
+    def test_progress_allows_artifact_created_by_current_preflight(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            reference = output / "convergence_reference_design.json"
+            reference.write_text('{"design": true}\n', encoding="utf-8")
+
+            progress = CampaignProgress(
+                output,
+                total=1,
+                report_every=1,
+                variable_names=("straight_lengths.0",),
+                frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+                allowed_existing=(reference,),
+            )
+            progress.close()
+
+            self.assertTrue(reference.is_file())
+            self.assertTrue((output / "evaluations.csv").is_file())
 
     def test_zero_coil_progress_uses_none_case(self):
         space = make_space(design_for_coil_count(AntennaDesign(), 0))
@@ -737,9 +1151,9 @@ class CampaignTests(unittest.TestCase):
             progress.close()
 
             payload = json.loads(
-                (output/"campaign_best.json").read_text(encoding="utf-8")
+                (output / "campaign_best.json").read_text(encoding="utf-8")
             )
-            rows = (output/"evaluations.csv").read_text().splitlines()
+            rows = (output / "evaluations.csv").read_text().splitlines()
             self.assertEqual(payload["coil_count"], 0)
             self.assertEqual(payload["turn_case"], [])
             self.assertIn("none", rows[1])
@@ -779,10 +1193,12 @@ class CampaignTests(unittest.TestCase):
             progress(records[1])
             progress.close()
 
-            with (output/"evaluations.csv").open(newline="", encoding="utf-8") as file:
+            with (output / "evaluations.csv").open(
+                newline="", encoding="utf-8"
+            ) as file:
                 rows = list(csv.DictReader(file))
             payload = json.loads(
-                (output/"campaign_best.json").read_text(encoding="utf-8")
+                (output / "campaign_best.json").read_text(encoding="utf-8")
             )
 
             self.assertEqual(rows[0]["shared_coil_pitch"], "")
@@ -791,11 +1207,11 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(rows[1]["coil_count"], "3")
             self.assertEqual(payload["coil_count"], 3)
             leaderboard = json.loads(
-                (output/"topology_leaderboard.json").read_text(encoding="utf-8")
+                (output / "topology_leaderboard.json").read_text(encoding="utf-8")
             )["topologies"]
             self.assertEqual([item["coil_count"] for item in leaderboard], [3, 0])
-            self.assertTrue((output/"turns_none_best.json").is_file())
-            self.assertTrue((output/"turns_1x1x1_best.json").is_file())
+            self.assertTrue((output / "turns_none_best.json").is_file())
+            self.assertTrue((output / "turns_1x1x1_best.json").is_file())
 
 
 if __name__ == "__main__":
