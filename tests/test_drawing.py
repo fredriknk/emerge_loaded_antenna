@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
+import emerge as em
 import numpy as np
 
 from emerge_loaded_antenna import AntennaDesign, CoilDesign
 from emerge_loaded_antenna.drawing import (
+    _horizon_gain,
     derive_drawing_dimensions,
     export_drawing,
     radial_centerlines,
@@ -90,3 +93,38 @@ def test_svg_export(tmp_path):
     destination = export_drawing(example_design(), tmp_path / "antenna.svg")
     assert destination.exists()
     assert destination.stat().st_size > 10_000
+
+
+def solved_result():
+    theta_axis = np.array((0.0, np.pi / 2.0, np.pi))
+    phi_axis = np.linspace(0.0, 2.0 * np.pi, 9)
+    phi, theta = np.meshgrid(phi_axis, theta_axis, indexing="ij")
+    horizon_gain_db = 1.0 + 2.0 * np.cos(phi)
+    norm_e = em.lib.EISO * 10.0 ** (horizon_gain_db / 20.0)
+    return SimpleNamespace(
+        frequencies=np.array((850e6, 868e6, 886e6)),
+        s11_db=np.array((-8.0, -15.0, -9.0)),
+        farfield_3d=SimpleNamespace(theta=theta, phi=phi, normE=norm_e),
+        farfield_metrics=SimpleNamespace(frequency_hz=868e6),
+    )
+
+
+def test_horizon_gain_extracts_and_closes_polar_cut():
+    phi, gain_db = _horizon_gain(solved_result())
+
+    assert phi.size == 9
+    assert math.isclose(phi[0], 0.0, abs_tol=1e-12)
+    assert math.isclose(phi[-1], 2.0 * np.pi, abs_tol=1e-12)
+    assert math.isclose(gain_db[0], 3.0, abs_tol=1e-12)
+    assert math.isclose(gain_db[-1], gain_db[0], abs_tol=1e-12)
+
+
+def test_svg_export_includes_solved_rf_plots(tmp_path):
+    destination = export_drawing(
+        example_design(),
+        tmp_path / "antenna-with-rf.svg",
+        result=solved_result(),
+    )
+
+    assert destination.exists()
+    assert destination.stat().st_size > 20_000

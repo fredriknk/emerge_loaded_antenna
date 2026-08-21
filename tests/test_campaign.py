@@ -64,7 +64,7 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(fine.restart_min_improvement, 0.05)
 
     def test_finetune_population_is_multiscale_bounded_and_reproducible(self):
-        space = make_space(AntennaDesign(), finetune=True)
+        space = make_space(AntennaDesign())
         population = build_finetune_population(space, 20, seed=17)
         repeated = build_finetune_population(space, 20, seed=17)
         normalized = np.asarray([space.normalize(row) for row in population])
@@ -78,7 +78,7 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(np.all((0 <= normalized) & (normalized <= 1)))
 
     def test_finetune_population_samples_inside_boundary_intersections(self):
-        space = make_space(AntennaDesign(), finetune=True)
+        space = make_space(AntennaDesign())
         lower = np.asarray([bound[0] for bound in space.bounds])
         population = build_finetune_population(
             space,
@@ -108,7 +108,7 @@ class CampaignTests(unittest.TestCase):
 
     def test_generation_monitor_reports_stagnation_and_diversity(self):
         objective = SimpleNamespace(history=[])
-        space = make_space(AntennaDesign(), finetune=True)
+        space = make_space(AntennaDesign())
         population = build_finetune_population(space, 10, seed=3)
         monitor = GenerationMonitor(
             objective,
@@ -234,7 +234,7 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(tiny_step_stats.evaluations, 5)
 
     def test_finetune_runner_restarts_without_exceeding_candidate_budget(self):
-        space = make_space(design_for_coil_count(AntennaDesign(), 0), finetune=True)
+        space = make_space(design_for_coil_count(AntennaDesign(), 0))
         schedule = CaseSchedule(
             (), space, maxiter=3, population=5, evaluations_per_run=20
         )
@@ -410,8 +410,8 @@ class CampaignTests(unittest.TestCase):
                 COLLINEAR_SECTION_START_LAMBDA * wavelength,
             )
         self.assertEqual(len(make_space(zero).variables), 3)
-        self.assertEqual(len(make_space(three).variables), 8)
-        self.assertEqual(len(make_space(three, finetune=True).variables), 12)
+        self.assertEqual(len(make_space(three).variables), 12)
+        self.assertEqual(len(make_space(three, lock_coils=True).variables), 8)
 
     def test_electrical_length_priors_are_broad_but_finite(self):
         frequency_hz = REFERENCE_DESIGN_FREQUENCY_HZ
@@ -451,12 +451,12 @@ class CampaignTests(unittest.TestCase):
         thick_bounds = dict(zip(thick.names, thick.bounds))
 
         self.assertGreater(
-            thick_bounds["shared_coil_pitch"][0],
-            thin_bounds["shared_coil_pitch"][0],
+            thick_bounds["coils.0.pitch"][0],
+            thin_bounds["coils.0.pitch"][0],
         )
         self.assertGreater(
-            thick_bounds["shared_coil_radius"][0],
-            thin_bounds["shared_coil_radius"][0],
+            thick_bounds["coils.0.radius"][0],
+            thin_bounds["coils.0.radius"][0],
         )
 
     def test_valid_warm_start_can_expand_below_preferred_wire_floor(self):
@@ -470,7 +470,7 @@ class CampaignTests(unittest.TestCase):
             self.assertLessEqual(lower, value)
             self.assertGreaterEqual(upper, value)
 
-    def test_broad_space_shares_coil_pitch_and_radius(self):
+    def test_coil_geometry_is_independent_unless_explicitly_locked(self):
         custom = AntennaDesign(
             straight_lengths=(0.1, 0.2, 0.1),
             coils=(
@@ -479,19 +479,19 @@ class CampaignTests(unittest.TestCase):
             ),
         )
 
-        broad = make_space(custom)
-        vector = broad.initial_vector.copy()
-        vector[broad.names.index("shared_coil_pitch")] = 8.5e-3
-        vector[broad.names.index("shared_coil_radius")] = 12e-3
-        decoded = broad.decode(vector)
-        fine = make_space(custom, finetune=True)
+        independent = make_space(custom)
+        locked = make_space(custom, lock_coils=True)
+        vector = locked.initial_vector.copy()
+        vector[locked.names.index("shared_coil_pitch")] = 8.5e-3
+        vector[locked.names.index("shared_coil_radius")] = 12e-3
+        decoded = locked.decode(vector)
 
-        self.assertEqual(len(broad.variables), 7)
-        self.assertEqual(len(fine.variables), 9)
+        self.assertEqual(len(independent.variables), 9)
+        self.assertEqual(len(locked.variables), 7)
         self.assertTrue(all(coil.pitch == 8.5e-3 for coil in decoded.coils))
         self.assertTrue(all(coil.radius == 12e-3 for coil in decoded.coils))
-        self.assertIn("coils.1.pitch", fine.names)
-        self.assertIn("coils.1.radius", fine.names)
+        self.assertIn("coils.1.pitch", independent.names)
+        self.assertIn("coils.1.radius", independent.names)
 
     def test_custom_start_is_inside_the_generated_search_space(self):
         custom = AntennaDesign(
@@ -543,10 +543,12 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(three.turn_cases, ((1, 2, 1), (2, 2, 1)))
         self.assertEqual(three.solver, "cudss")
         self.assertFalse(three.finetune)
+        self.assertFalse(three.lock_coils)
 
         with patch("sys.argv", ["optimize_gain.py", "--finetune"]):
             fine = parse_args()
         self.assertTrue(fine.finetune)
+        self.assertFalse(fine.lock_coils)
         self.assertEqual(fine.finetune_near_radius, 0.03)
         self.assertEqual(fine.finetune_wide_radius, 0.10)
         self.assertEqual(fine.finetune_mutation, (0.2, 0.6))
@@ -556,6 +558,19 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(fine.s11_margin_target_db, -12.0)
         self.assertEqual(fine.s11_margin_weight, 0.10)
         self.assertEqual(fine.confirmation_runs, 3)
+
+        with patch("sys.argv", ["optimize_gain.py", "--lock-coils"]):
+            locked = parse_args()
+        self.assertTrue(locked.lock_coils)
+        self.assertFalse(locked.finetune)
+
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--lock-coils", "--finetune"],
+        ):
+            locked_fine = parse_args()
+        self.assertTrue(locked_fine.lock_coils)
+        self.assertTrue(locked_fine.finetune)
 
     def test_cli_rejects_nonfinite_objective_and_grid_inputs(self):
         with (
@@ -637,11 +652,11 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(
             [len(schedule.space.variables) for schedule in schedules],
-            [3, 6, 8],
+            [3, 6, 12],
         )
         self.assertEqual(
             [schedule.population for schedule in schedules],
-            [24, 48, 64],
+            [24, 48, 96],
         )
         self.assertEqual(
             [schedule.evaluations_per_run for schedule in schedules],
@@ -657,6 +672,17 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(
             [len(schedule.space.variables) for schedule in fine_schedules],
             [3, 6, 12],
+        )
+
+        args.lock_coils = True
+        locked_schedules = build_case_schedules(
+            args,
+            AntennaDesign(),
+            REFERENCE_DESIGN_FREQUENCY_HZ,
+        )
+        self.assertEqual(
+            [len(schedule.space.variables) for schedule in locked_schedules],
+            [3, 6, 8],
         )
 
     def test_campaign_executes_and_ranks_every_requested_coil_count(self):
@@ -738,7 +764,7 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(best["coil_count"], 3)
             self.assertEqual(
                 best["simulation"]["coil_parameterization"],
-                "shared",
+                "independent",
             )
             self.assertEqual(
                 best["simulation"]["search_bounds"]["policy"],
@@ -1201,8 +1227,9 @@ class CampaignTests(unittest.TestCase):
                 (output / "campaign_best.json").read_text(encoding="utf-8")
             )
 
-            self.assertEqual(rows[0]["shared_coil_pitch"], "")
-            self.assertNotEqual(rows[1]["shared_coil_pitch"], "")
+            self.assertEqual(rows[0]["coils.0.pitch"], "")
+            self.assertNotEqual(rows[1]["coils.0.pitch"], "")
+            self.assertNotEqual(rows[1]["coils.2.pitch"], "")
             self.assertEqual(rows[0]["coil_count"], "0")
             self.assertEqual(rows[1]["coil_count"], "3")
             self.assertEqual(payload["coil_count"], 3)

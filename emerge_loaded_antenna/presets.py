@@ -31,7 +31,6 @@ def scale_design(design: AntennaDesign, factor: float) -> AntennaDesign:
                 radius=coil.radius*factor,
                 pitch=coil.pitch*factor,
                 transition=coil.transition*factor,
-                transition_offset=coil.transition_offset*factor,
             )
             for coil in design.coils
         ),

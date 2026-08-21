@@ -1,5 +1,5 @@
 {
-    "wire_radius": 0.008,
+    "wire_radius": 0.0008,
     "radial_length": 0.11835875886794944,
     "radial_angle_deg": 30.116935985992047,
     "radial_count": 4,
@@ -14,7 +14,7 @@
         "turns": 1,
         "pitch": 0.007457187656049569,
         "transition": 0.001,
-        "transition_offset": 0.00475,
+        "transition_offset": 0.0007916666666666666,
         "handedness": "RH"
       },
       {
@@ -22,7 +22,7 @@
         "turns": 1,
         "pitch": 0.006089726971539542,
         "transition": 0.001,
-        "transition_offset": 0.00475,
+        "transition_offset": 0.0007916666666666666,
         "handedness": "RH"
       }
     ],

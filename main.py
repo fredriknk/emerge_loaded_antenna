@@ -32,9 +32,7 @@ F0 = 869.5*MHz
 # Tracked example geometry evaluated at this script's target frequency.
 DESIGN = load_reference_design(F0)
 
-import math
 trans = 1*mm
-relationship = 19/24
 DESIGN = replace(
     DESIGN,
     wire_radius=0.8*mm,
@@ -45,11 +43,6 @@ DESIGN = replace(
     )
 )
 print(DESIGN)
-export_drawing(
-    DESIGN,
-    "my_manual_antenna.pdf",
-    title=f"868 MHz Prototype",
-)
 
 RUN_SOLVER = True
 SHOW_GEOMETRY = True
@@ -245,6 +238,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     result = simulate(DESIGN, replace(OPTIONS, solver=args.solver))
+    export_drawing(
+        DESIGN,
+        "my_manual_antenna.pdf",
+        result=result if result.solved else None,
+        title=f"{F0/MHz:g} MHz Prototype",
+    )
     if not result.solved:
         print("Done (mesh only).")
         return

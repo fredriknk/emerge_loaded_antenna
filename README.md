@@ -113,6 +113,30 @@ counts, optional peak gain, and the underlying EMerge artifacts when deeper
 inspection is needed. `build_model()` performs geometry and meshing without a
 solve.
 
+### Fabrication drawing
+
+Pass a solved result with far-field data to include the S11 sweep and the
+XY/horizon gain lobe on the dimensioned work drawing:
+
+```python
+from emerge_loaded_antenna.drawing import export_drawing
+
+drawing_result = simulate(
+    design,
+    replace(options, compute_farfield=True, farfield_frequency=868e6),
+)
+export_drawing(
+    design,
+    "antenna.pdf",
+    result=drawing_result,
+    title="868 MHz Prototype",
+)
+```
+
+Calling `export_drawing()` without `result` still produces the fabrication
+geometry and dimensions, with labeled placeholders for the RF plots. The
+command-line drawing exporter accepts design JSON and writes PDF, SVG, or PNG.
+
 ### Optimizer Adapter
 
 ```python
@@ -260,15 +284,28 @@ substantially higher or lower. Apparent new incumbents are confirmed with
 three simulations by default, so `--hours` remains an estimate. Progress and
 result files report optimizer candidates and physical simulations separately.
 
-The broad search optimizes every straight length, one pitch and radius shared
-by all coils, radial length, and radial angle. Thus a design with N >= 1 coils
-has only N+5 continuous variables; the zero-coil case has three. After the first
-coil, each added coil introduces only one additional straight length. S11 is
+By default, the broad search optimizes every straight length and every coil's
+pitch and radius independently, together with radial length and radial angle.
+Thus a design with N >= 1 coils has 3N+3 continuous variables; the zero-coil
+case has three. Add `--lock-coils` only when every coil should share one pitch
+and radius. That lower-dimensional parameterization has N+5 variables. S11 is
 constrained at the lower edge, center and upper edge of the requested matching
 band. Every run receives the synthesized or supplied design as `x0`; each
 candidate is flushed to CSV and every new global best is atomically
 checkpointed as `campaign_best.json`. Output goes into a new frequency-labelled
 timestamped directory so previous campaigns are never overwritten.
+
+For an intentionally locked, lower-dimensional campaign, use:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --hours 12 `
+    --lock-coils
+```
+
+`--lock-coils` is independent of `--finetune` and may be used with either
+optimizer mode. The saved campaign metadata reports the effective coil
+parameterization as `independent` or `shared`.
 
 Choose the coil count explicitly. A zero-coil campaign optimizes a conventional
 straight radiator:
@@ -297,8 +334,11 @@ also gets an interruption-safe `turns_*_best.json` checkpoint, and
 objective.
 
 Once the broad campaign has selected a topology and a good geometry, rerun its
-winner with `--finetune`. This releases every coil pitch and radius as an
-independent variable; with N coils the search then has 3N+3 variables:
+winner with `--finetune`. This changes the optimizer to local multiscale
+populations and a bounded local search; it does not control coil coupling.
+Coil pitch and radius remain independent by default, giving 3N+3 variables for
+N coils. If the broad run used `--lock-coils`, omit that flag here to release
+the coils:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
@@ -384,8 +424,9 @@ entries. For example, three coils use
 combined with `--turn-cases`; use the mixed list form when explicit turns are
 needed.
 
-For best optimizer convergence, first use the shared-geometry broad campaign,
-then fine-tune its winner. `--pattern directional --target-theta ...
+When a deliberately lower-dimensional first pass is useful, add `--lock-coils`
+to the broad campaign, then fine-tune its winner without that flag. `--pattern
+directional --target-theta ...
 --target-phi ...` selects a fixed beam direction; `--pattern peak` restores
 unrestricted maximum-gain optimization. Run `--help` for all objective weights
 and budget controls.
@@ -533,7 +574,6 @@ design = AntennaDesign(
             turns=1,
             pitch=0.007,
             transition=0.006,
-            transition_offset=0.00475,
             handedness="RH",
         ),
         CoilDesign(
@@ -541,7 +581,6 @@ design = AntennaDesign(
             turns=1,
             pitch=0.007,
             transition=0.006,
-            transition_offset=0.00475,
             handedness="RH",
         ),
     ),
@@ -560,8 +599,10 @@ Add entries to both tuples to create three or more coils.
 The coil radius is measured to the wire centerline, so its approximate outside
 diameter is `2 * (coil.radius + design.wire_radius)`. Pitch is the axial rise
 per complete revolution. Transition length controls the local entry/exit bend;
-transition offset sets the chord distance from the straight axis to the helix
-join independently of pitch.
+the chord distance from the straight axis to the helix join is derived as
+`transition * 19 / 24`. Keep transition at least `1.25 * wire_radius` for a
+usable bend. Older designs may still supply `transition_offset`, but it is
+normalized to the derived value when `CoilDesign` is constructed.
 
 Coil turns must currently be positive integers. Handedness may be `"RH"` or
 `"LH"`, independently for each coil.
@@ -938,7 +979,7 @@ straight_lengths.2
 ```
 
 A variable can intentionally control several fields. This is how the campaign
-shares coil geometry during its broad phase:
+shares coil geometry when `--lock-coils` is requested:
 
 ```python
 DesignVariable(
@@ -1052,8 +1093,8 @@ and the outside diameter is approximately:
 The entrance and exit connector lengths are added around the constant-pitch
 portion and may be longer than `turns * pitch`.
 
-The two connectors use a small chord allowance set by
-`CoilDesign.transition_offset`; the remaining requested rotation uses the
+The two connectors use a chord allowance derived as
+`CoilDesign.transition * 19 / 24`; the remaining requested rotation uses the
 specified constant pitch. Consequently, connector length can be selected for
 bend quality without imposing a minimum coil pitch. The exact axial height is:
 

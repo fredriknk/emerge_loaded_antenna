@@ -15,11 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
 from .config import AntennaDesign, CoilDesign
+
+if TYPE_CHECKING:
+    from .simulation import SimulationResult
 
 MM = 1e-3
 MODEL_HUB_HEIGHT = 6.0 * MM
@@ -539,15 +542,175 @@ def _draw_table(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> No
     ax.text(0.0, 0.12, notes, fontsize=6.8, va="bottom", wrap=True, transform=ax.transAxes)
 
 
+def _draw_unavailable_plot(ax, title: str) -> None:
+    """Draw a consistent placeholder when no solved RF result was supplied."""
+    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.text(
+        0.5,
+        0.5,
+        "Solved simulation result not supplied",
+        ha="center",
+        va="center",
+        fontsize=7,
+        color="0.4",
+        transform=ax.transAxes,
+    )
+    ax.grid(True, linewidth=0.35, alpha=0.35)
+    ax.tick_params(labelsize=7)
+
+
+def _result_frequency_hz(result: SimulationResult) -> float | None:
+    metrics = getattr(result, "farfield_metrics", None)
+    value = getattr(metrics, "frequency_hz", None)
+    if value is None:
+        options = getattr(result, "options", None)
+        value = getattr(options, "farfield_frequency", None)
+    if value is None or not np.isfinite(value):
+        return None
+    return float(value)
+
+
+def _draw_s11(ax, result: SimulationResult | None) -> None:
+    """Draw the solved reflection-coefficient sweep."""
+    if result is None:
+        _draw_unavailable_plot(ax, "S11 sweep")
+        ax.set_xlabel("Frequency (MHz)", fontsize=8)
+        ax.set_ylabel("S11 (dB)", fontsize=8)
+        return
+
+    frequencies = np.asarray(result.frequencies, dtype=float).reshape(-1)
+    s11_db = np.asarray(result.s11_db, dtype=float).reshape(-1)
+    if not frequencies.size or frequencies.size != s11_db.size:
+        _draw_unavailable_plot(ax, "S11 sweep")
+        ax.set_xlabel("Frequency (MHz)", fontsize=8)
+        ax.set_ylabel("S11 (dB)", fontsize=8)
+        return
+
+    frequency_mhz = frequencies / 1e6
+    marker = "o" if frequencies.size <= 20 else None
+    ax.plot(frequency_mhz, s11_db, marker=marker, markersize=3, linewidth=1.1)
+    ax.axhline(-10.0, color="tab:red", linestyle="--", linewidth=0.8, label="-10 dB")
+
+    farfield_frequency = _result_frequency_hz(result)
+    if farfield_frequency is not None:
+        ax.axvline(
+            farfield_frequency / 1e6,
+            color="0.45",
+            linestyle=":",
+            linewidth=0.8,
+            label="lobe frequency",
+        )
+
+    ax.set_title("S11 sweep", fontsize=9, fontweight="bold")
+    ax.set_xlabel("Frequency (MHz)", fontsize=8)
+    ax.set_ylabel("S11 (dB)", fontsize=8)
+    ax.grid(True, linewidth=0.35, alpha=0.35)
+    ax.tick_params(labelsize=7)
+    ax.legend(fontsize=6.5, loc="best")
+
+
+def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted horizon azimuth and realized gain from a sampled 3-D field."""
+    farfield = getattr(result, "farfield_3d", None)
+    if farfield is None:
+        raise ValueError("far-field data is unavailable")
+
+    theta = np.asarray(farfield.theta, dtype=float)
+    phi = np.asarray(farfield.phi, dtype=float)
+    norm_e = np.asarray(farfield.normE)
+    try:
+        theta, phi, norm_e = np.broadcast_arrays(theta, phi, norm_e)
+    except ValueError as error:
+        raise ValueError("far-field coordinate and value shapes do not match") from error
+    if not theta.size:
+        raise ValueError("far-field data is empty")
+
+    theta_distance = np.abs(theta - np.pi / 2.0)
+    nearest_distance = float(np.nanmin(theta_distance))
+    horizon = np.isclose(theta_distance, nearest_distance, rtol=0.0, atol=1e-10)
+    phi_values = np.mod(phi[horizon], 2.0 * np.pi)
+
+    # EMerge's normE/EISO ratio is the realized-gain amplitude used throughout
+    # the simulation and verification code.
+    import emerge as em
+
+    gain_values = 20.0 * np.log10(
+        np.maximum(np.abs(norm_e[horizon]) / em.lib.EISO, 1e-12)
+    )
+    finite = np.isfinite(phi_values) & np.isfinite(gain_values)
+    phi_values = phi_values[finite]
+    gain_values = gain_values[finite]
+    if not phi_values.size:
+        raise ValueError("far-field horizon data is empty")
+
+    order = np.argsort(phi_values)
+    phi_values = phi_values[order]
+    gain_values = gain_values[order]
+
+    # A 0/360-degree endpoint pair is common in spherical grids. Average any
+    # duplicate azimuth samples so the polar line closes without a false seam.
+    rounded_phi = np.round(phi_values, decimals=12)
+    unique_phi, inverse = np.unique(rounded_phi, return_inverse=True)
+    sums = np.bincount(inverse, weights=gain_values)
+    counts = np.bincount(inverse)
+    gain_values = sums / counts
+    phi_values = unique_phi
+
+    if phi_values.size > 1:
+        phi_values = np.append(phi_values, phi_values[0] + 2.0 * np.pi)
+        gain_values = np.append(gain_values, gain_values[0])
+    return phi_values, gain_values
+
+
+def _draw_horizon_lobe(ax, result: SimulationResult | None) -> None:
+    """Draw the XY/horizon realized-gain lobe on a polar axis."""
+    if result is None:
+        _draw_unavailable_plot(ax, "XY/horizon gain lobe")
+        return
+    try:
+        phi, gain_db = _horizon_gain(result)
+    except (AttributeError, TypeError, ValueError):
+        _draw_unavailable_plot(ax, "XY/horizon gain lobe")
+        return
+
+    peak_gain = float(np.nanmax(gain_db))
+    radial_floor = max(-40.0, float(math.floor(peak_gain - 30.0)))
+    if radial_floor >= peak_gain:
+        radial_floor = float(math.floor(peak_gain - 10.0))
+    radial_ceiling = float(math.ceil(peak_gain + 1.0))
+    ax.plot(phi, np.maximum(gain_db, radial_floor), linewidth=1.1)
+    ax.set_rlim(radial_floor, radial_ceiling)
+    frequency_hz = _result_frequency_hz(result)
+    frequency_text = (
+        f" at {frequency_hz / 1e6:g} MHz" if frequency_hz is not None else ""
+    )
+    ax.set_title(
+        f"XY/horizon realized gain{frequency_text} (dBi)",
+        fontsize=9,
+        fontweight="bold",
+        pad=12,
+    )
+    ax.set_theta_zero_location("E")
+    ax.set_theta_direction(1)
+    ax.grid(True, linewidth=0.35, alpha=0.35)
+    ax.tick_params(labelsize=6.5)
+
+
 def export_drawing(
     design: AntennaDesign,
     output: str | Path,
     *,
+    result: SimulationResult | None = None,
     title: str | None = None,
     points_per_turn: int = 160,
     dpi: int = 300,
 ) -> Path:
-    """Export an A4-landscape fabrication sheet as PDF, SVG, or PNG."""
+    """Export an A4-landscape fabrication sheet as PDF, SVG, or PNG.
+
+    Pass a solved ``SimulationResult`` to include its S11 sweep and sampled
+    XY/horizon realized-gain lobe. Geometry-only callers remain supported and
+    receive clearly marked placeholders for those two plots.
+    """
     design.validate()
     destination = Path(output)
     suffix = destination.suffix.lower()
@@ -556,7 +719,7 @@ def export_drawing(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
     except ImportError as error:  # pragma: no cover - environment dependent
         raise RuntimeError(
             "drawing export requires matplotlib; install the package with the drawing extra"
@@ -565,22 +728,41 @@ def export_drawing(
     dims = derive_drawing_dimensions(design)
     path_mm = sample_centerline(design, points_per_turn=points_per_turn) / MM
 
-    figure = plt.figure(figsize=(11.69, 8.27), constrained_layout=True)
-    grid = figure.add_gridspec(2, 3, height_ratios=(2.25, 1.0))
-    ax_xz = figure.add_subplot(grid[0, 0])
-    ax_yz = figure.add_subplot(grid[0, 1])
-    ax_xy = figure.add_subplot(grid[0, 2])
-    ax_table = figure.add_subplot(grid[1, :])
+    # Build the figure directly instead of going through pyplot.  Exporting a
+    # drawing is non-interactive and must not require a working Tk/Qt desktop
+    # backend (for example in CI or on a headless solver machine).
+    figure = Figure(figsize=(11.69, 8.27), constrained_layout=True)
+    grid = figure.add_gridspec(4, 6, height_ratios=(0.18, 2.2, 1.2, 1.45))
+    ax_title = figure.add_subplot(grid[0, :])
+    ax_xz = figure.add_subplot(grid[1, 0:2])
+    ax_yz = figure.add_subplot(grid[1, 2:4])
+    ax_xy = figure.add_subplot(grid[1, 4:6])
+    ax_s11 = figure.add_subplot(grid[2, 0:3])
+    ax_lobe = figure.add_subplot(grid[2, 3:6], projection="polar")
+    ax_table = figure.add_subplot(grid[3, :])
+
+    ax_title.axis("off")
+    ax_title.text(
+        0.5,
+        0.5,
+        title or "Loaded Antenna Fabrication Drawing",
+        ha="center",
+        va="center",
+        fontsize=14,
+        fontweight="bold",
+        transform=ax_title.transAxes,
+    )
 
     _draw_side_view(ax_xz, design, path_mm, "xz")
     _draw_side_view(ax_yz, design, path_mm, "yz")
     _draw_top_view(ax_xy, design, path_mm)
     _draw_dimensions(ax_xz, design, dims)
+    _draw_s11(ax_s11, result)
+    _draw_horizon_lobe(ax_lobe, result)
     _draw_table(ax_table, design, dims)
 
-    figure.suptitle(title or "Loaded Antenna Fabrication Drawing", fontsize=14, fontweight="bold")
     figure.savefig(destination, dpi=dpi)
-    plt.close(figure)
+    figure.clear()
     return destination
 
 

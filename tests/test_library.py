@@ -59,6 +59,32 @@ def _robust_result(
 
 
 class DesignTests(unittest.TestCase):
+    def test_transition_offset_is_derived_and_tracks_replacement(self):
+        coil = CoilDesign(transition=12e-3, transition_offset=1e-3)
+
+        self.assertAlmostEqual(coil.transition_offset, 12e-3*19/24)
+
+        resized = replace(coil, transition=6e-3)
+        self.assertAlmostEqual(resized.transition_offset, 4.75e-3)
+
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            CoilDesign(transition=float("nan")).validate()
+
+    def test_transition_must_be_at_least_five_quarters_wire_radius(self):
+        at_limit = AntennaDesign(
+            wire_radius=0.8e-3,
+            straight_lengths=(0.1, 0.1),
+            coils=(CoilDesign(transition=1e-3),),
+        )
+        at_limit.validate()
+
+        below_limit = replace(
+            at_limit,
+            coils=(replace(at_limit.coils[0], transition=0.99e-3),),
+        )
+        with self.assertRaisesRegex(ValueError, "at least 1.25 times wire_radius"):
+            below_limit.validate()
+
     def test_default_centerline_is_compact_and_returns_to_axis(self):
         design = AntennaDesign()
         path = build_centerline(design)
@@ -248,6 +274,19 @@ class DesignTests(unittest.TestCase):
         restored = design_from_dict(asdict(original))
 
         self.assertEqual(restored, original)
+
+    def test_legacy_transition_offset_json_is_normalized(self):
+        values = asdict(AntennaDesign())
+        values["coils"][0]["transition"] = 12e-3
+        values["coils"][0]["transition_offset"] = 1e-6
+
+        restored = design_from_dict(values)
+
+        self.assertAlmostEqual(restored.coils[0].transition_offset, 9.5e-3)
+        self.assertAlmostEqual(
+            asdict(restored)["coils"][0]["transition_offset"],
+            9.5e-3,
+        )
 
     def test_unknown_design_fields_are_rejected(self):
         values = asdict(AntennaDesign())
