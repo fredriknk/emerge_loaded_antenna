@@ -360,8 +360,8 @@ def _build_radial_angle_gauge(
     # The hub relief is a right-side bite in the upright, immediately above
     # the angle vertex.  Its lower edge never crosses the sloped radial arm.
     hub_cutout = gmsh.model.occ.addBox(
-        pivot_x - hub_cutout_depth,
-        pivot_y,
+        0,
+        0,
         -plate_thickness * 0.1,
         hub_cutout_depth + plate_thickness * 0.1,
         hub_height + hub_cutout_extra,
@@ -410,6 +410,7 @@ def _build_radial_angle_gauge(
         raise RuntimeError(
             f"radial angle gauge Boolean produced {len(volumes)} solids"
         )
+    
     return volumes[0]
 
 

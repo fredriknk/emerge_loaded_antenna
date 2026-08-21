@@ -48,7 +48,7 @@ DESIGN = replace(
 )
 print(DESIGN)
 
-RUN_SOLVER = True
+RUN_SOLVER = False
 SHOW_GEOMETRY = False
 SHOW_COIL_PREVIEW = False
 SHOW_MESH = False
