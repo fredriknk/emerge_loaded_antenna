@@ -30,7 +30,7 @@ def test_former_dimensions_use_centerline_diameter_and_five_mm_extension():
     )
 
 
-def test_step_export_contains_winding_and_sizing_solid_per_coil(tmp_path):
+def test_step_export_contains_coil_tools_and_radial_gauge(tmp_path):
     destination = export_coil_formers(example_design(), tmp_path / "formers.step")
 
     assert destination.exists()
@@ -47,7 +47,7 @@ def test_step_export_contains_winding_and_sizing_solid_per_coil(tmp_path):
         gmsh.model.add("former_import_check")
         gmsh.model.occ.importShapes(str(destination.resolve()))
         gmsh.model.occ.synchronize()
-        assert len(gmsh.model.getEntities(3)) == 2 * example_design().coil_count
+        assert len(gmsh.model.getEntities(3)) == 2 * example_design().coil_count + 1
     finally:
         if gmsh.isInitialized():
             if gmsh.model.getCurrent() == "former_import_check":

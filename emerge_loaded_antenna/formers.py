@@ -288,6 +288,131 @@ def _build_former(
     return volumes[0]
 
 
+def _build_radial_angle_gauge(
+    design: AntennaDesign,
+    *,
+    origin_x: float,
+    plate_thickness: float,
+    vertical_length: float,
+    vertical_width: float,
+    arm_width: float,
+    end_margin: float,
+    hub_cutout_extra: float,
+    mark_width: float,
+    mark_depth: float,
+) -> int:
+    """Build a simple flat L-gauge for radial angle and nominal length."""
+    angle = math.radians(design.radial_angle_deg)
+    arm_length = design.radial_length + end_margin
+    hub_height = 6.0e-3
+    hub_radius = 1.95e-3 / 2.0 + 2.0 * design.wire_radius
+    hub_cutout_depth = 2.0 * hub_radius + hub_cutout_extra
+    if vertical_width <= hub_cutout_depth + 1.0e-3:
+        raise ValueError(
+            "gauge_vertical_width must leave at least 1 mm behind the hub cutout"
+        )
+    pivot_x = origin_x + vertical_width
+    pivot_y = arm_length * math.sin(angle) + arm_width
+
+    # CAD X-Y is the functional side view and CAD Z is the print thickness, so
+    # the gauge arrives flat on the slicer bed.  The right edge of this leg is
+    # held parallel to the antenna's vertical wire.
+    vertical_leg = gmsh.model.occ.addBox(
+        origin_x,
+        pivot_y - arm_width,
+        0.0,
+        vertical_width,
+        vertical_length + arm_width,
+        plate_thickness,
+    )
+
+    # The top edge of the sloped arm is the actual angle reference.  A small
+    # overlap at the corner makes the union insensitive to CAD tolerances.
+    corner_overlap = min(vertical_width / 2.0, 2.0e-3)
+    sloped_arm = gmsh.model.occ.addBox(
+        pivot_x - corner_overlap,
+        pivot_y - arm_width,
+        0.0,
+        arm_length + corner_overlap,
+        arm_width,
+        plate_thickness,
+    )
+    gmsh.model.occ.rotate(
+        [(3, sloped_arm)],
+        pivot_x,
+        pivot_y,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        -angle,
+    )
+    joined, _ = gmsh.model.occ.fuse(
+        [(3, vertical_leg)],
+        [(3, sloped_arm)],
+        removeObject=True,
+        removeTool=True,
+    )
+    joined_volumes = [entity for entity in joined if entity[0] == 3]
+    if len(joined_volumes) != 1:
+        raise RuntimeError("failed to join the radial angle gauge legs")
+
+    # The hub relief is a right-side bite in the upright, immediately above
+    # the angle vertex.  Its lower edge never crosses the sloped radial arm.
+    hub_cutout = gmsh.model.occ.addBox(
+        pivot_x - hub_cutout_depth,
+        pivot_y,
+        -plate_thickness * 0.1,
+        hub_cutout_depth + plate_thickness * 0.1,
+        hub_height + hub_cutout_extra,
+        plate_thickness * 1.2,
+    )
+    relieved, _ = gmsh.model.occ.cut(
+        joined_volumes,
+        [(3, hub_cutout)],
+        removeObject=True,
+        removeTool=True,
+    )
+    relieved_volumes = [entity for entity in relieved if entity[0] == 3]
+    if len(relieved_volumes) != 1:
+        raise RuntimeError(
+            f"radial gauge hub relief produced {len(relieved_volumes)} solids"
+        )
+
+    # A through-notch in the reference edge marks the nominal virtual-apex to
+    # radial-tip length without adding a wire groove or other locating feature.
+    length_mark = gmsh.model.occ.addBox(
+        pivot_x + design.radial_length - mark_width / 2.0,
+        pivot_y - mark_depth,
+        -plate_thickness * 0.1,
+        mark_width,
+        mark_depth + plate_thickness * 0.1,
+        plate_thickness * 1.2,
+    )
+    gmsh.model.occ.rotate(
+        [(3, length_mark)],
+        pivot_x,
+        pivot_y,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        -angle,
+    )
+    cut, _ = gmsh.model.occ.cut(
+        relieved_volumes,
+        [(3, length_mark)],
+        removeObject=True,
+        removeTool=True,
+    )
+    volumes = [tag for dim, tag in cut if dim == 3]
+    if len(volumes) != 1:
+        raise RuntimeError(
+            f"radial angle gauge Boolean produced {len(volumes)} solids"
+        )
+    return volumes[0]
+
+
 def export_coil_formers(
     design: AntennaDesign,
     output: str | Path,
@@ -300,6 +425,15 @@ def export_coil_formers(
     marker_depth: float = 0.15e-3,
     marker_width: float = 0.35e-3,
     marker_length: float = 2.0e-3,
+    include_radial_gauge: bool = True,
+    gauge_thickness: float = 1.0e-3,
+    gauge_vertical_length: float = 40.0e-3,
+    gauge_vertical_width: float = 10.0e-3,
+    gauge_arm_width: float = 6.0e-3,
+    gauge_end_margin: float = 5.0e-3,
+    gauge_hub_cutout_extra: float = 3.5e-3,
+    gauge_mark_width: float = 0.8e-3,
+    gauge_mark_depth: float = 1.0e-3,
     stl_mesh_size: float | None = None,
 ) -> Path:
     """Export grooved coil formers to one STEP or STL file.
@@ -328,6 +462,20 @@ def export_coil_formers(
         raise ValueError("sizing_groove_depth cannot be negative")
     if marker_depth < 0 or marker_width < 0 or marker_length < 0:
         raise ValueError("marker dimensions cannot be negative")
+    if any(
+        value <= 0
+        for value in (
+            gauge_thickness,
+            gauge_vertical_length,
+            gauge_vertical_width,
+            gauge_arm_width,
+            gauge_end_margin,
+            gauge_hub_cutout_extra,
+            gauge_mark_width,
+            gauge_mark_depth,
+        )
+    ):
+        raise ValueError("radial gauge dimensions must be positive")
 
     owns_gmsh = not bool(gmsh.isInitialized())
     previous_model = ""
@@ -384,6 +532,21 @@ def export_coil_formers(
                     f"SizingMandrelC{item.index}",
                 )
                 next_left_edge += item.inside_diameter + spacing
+
+        if include_radial_gauge:
+            gauge = _build_radial_angle_gauge(
+                design,
+                origin_x=next_left_edge,
+                plate_thickness=gauge_thickness,
+                vertical_length=gauge_vertical_length,
+                vertical_width=gauge_vertical_width,
+                arm_width=gauge_arm_width,
+                end_margin=gauge_end_margin,
+                hub_cutout_extra=gauge_hub_cutout_extra,
+                mark_width=gauge_mark_width,
+                mark_depth=gauge_mark_depth,
+            )
+            gmsh.model.setEntityName(3, gauge, "RadialLAngleGauge")
         gmsh.model.occ.synchronize()
 
         if destination.suffix.lower() == ".stl":
@@ -427,6 +590,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--marker-depth-mm", type=float, default=0.15)
     parser.add_argument("--marker-width-mm", type=float, default=0.35)
     parser.add_argument("--marker-length-mm", type=float, default=2.0)
+    parser.add_argument("--no-radial-gauge", action="store_true")
+    parser.add_argument("--gauge-thickness-mm", type=float, default=1.0)
+    parser.add_argument("--gauge-vertical-length-mm", type=float, default=40.0)
+    parser.add_argument("--gauge-vertical-width-mm", type=float, default=10.0)
+    parser.add_argument("--gauge-arm-width-mm", type=float, default=6.0)
+    parser.add_argument("--gauge-end-margin-mm", type=float, default=5.0)
+    parser.add_argument("--gauge-hub-cutout-extra-mm", type=float, default=3.5)
+    parser.add_argument("--gauge-mark-width-mm", type=float, default=0.8)
+    parser.add_argument("--gauge-mark-depth-mm", type=float, default=1.0)
     parser.add_argument("--stl-mesh-size-mm", type=float, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -442,6 +614,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         marker_depth=args.marker_depth_mm * millimetres,
         marker_width=args.marker_width_mm * millimetres,
         marker_length=args.marker_length_mm * millimetres,
+        include_radial_gauge=not args.no_radial_gauge,
+        gauge_thickness=args.gauge_thickness_mm * millimetres,
+        gauge_vertical_length=args.gauge_vertical_length_mm * millimetres,
+        gauge_vertical_width=args.gauge_vertical_width_mm * millimetres,
+        gauge_arm_width=args.gauge_arm_width_mm * millimetres,
+        gauge_end_margin=args.gauge_end_margin_mm * millimetres,
+        gauge_hub_cutout_extra=args.gauge_hub_cutout_extra_mm * millimetres,
+        gauge_mark_width=args.gauge_mark_width_mm * millimetres,
+        gauge_mark_depth=args.gauge_mark_depth_mm * millimetres,
         stl_mesh_size=(
             None
             if args.stl_mesh_size_mm is None

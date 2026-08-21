@@ -164,11 +164,21 @@ continues through both end faces. A 0.1 mm radial printing clearance is
 included by default and can be changed with `groove_clearance=...`.
 
 Four short transverse witness notches beside the wire path identify the start
-and end of both Hermite transitions. Each coil also gets an inside-diameter sizing
-mandrel with a shallow 0.2 mm path indication for manually correcting
+and end of both Hermite transitions. Each coil also gets an inside-diameter
+sizing mandrel with a shallow 0.2 mm path indication for manually correcting
 spring-back. Set `sizing_groove_depth=0` for a smooth sizing mandrel, or
 `include_sizing_mandrels=False` to omit it. All tools are separate solids in
 the same file, spaced 5 mm apart.
+
+The same export also includes a simple flat-printing L-shaped radial gauge.
+Hold its straight leg parallel to the antenna and lower the sloped reference
+edge onto the top of a radial. The edge uses the configured
+`radial_angle_deg`; a small edge notch marks the nominal `radial_length` from
+the angle vertex. A side-open relief is cut into the right side of the upright,
+immediately above the sloped arm, and is sized from the modeled hub diameter
+and height plus 3.5 mm. The default gauge is 1 mm thick, with a 10 x 40 mm
+vertical leg and a 6 mm wide sloped arm. It has no radial groove. Set
+`include_radial_gauge=False` to omit it.
 
 The standalone command accepts a saved design or optimizer-result JSON:
 
