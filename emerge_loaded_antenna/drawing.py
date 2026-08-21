@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from .simulation import SimulationResult
 
 MM = 1e-3
+A3_LANDSCAPE_SIZE_INCHES = (420.0 / 25.4, 297.0 / 25.4)
+A3_FONT_SCALE = math.sqrt(2.0)
 MODEL_HUB_HEIGHT = 6.0 * MM
 MODEL_HUB_CORE_RADIUS = 1.95 * MM / 2.0
 
@@ -38,10 +40,13 @@ class CoilDrawingDimensions:
     z_end: float
     radius: float
     diameter: float
+    inside_radius: float
+    inside_diameter: float
     center_x: float
     turns: int
     pitch: float
     transition: float
+    transition_radius: float
     transition_offset: float
     handedness: str
     alpha_deg: float
@@ -81,6 +86,41 @@ def _coil_parameters(coil: CoilDesign) -> tuple[float, float, float]:
     return alpha, middle_rotation, middle_rise
 
 
+def _transition_radius_at_axis(coil: CoilDesign) -> float:
+    """Return the inlet spline's local radius of curvature at the straight join."""
+    sign = 1.0 if coil.handedness.upper() == "RH" else -1.0
+    alpha = sign * 2.0 * math.asin(coil.transition_offset / (2.0 * coil.radius))
+    omega = sign * 2.0 * math.pi / coil.pitch
+    displacement = np.array(
+        (
+            coil.radius * (math.cos(alpha) - 1.0),
+            coil.radius * math.sin(alpha),
+            coil.transition,
+        )
+    )
+    vertical_tangent = np.array((0.0, 0.0, 1.0))
+    helix_tangent = np.array(
+        (
+            -coil.radius * omega * math.sin(alpha),
+            coil.radius * omega * math.cos(alpha),
+            1.0,
+        )
+    )
+    helix_tangent /= np.linalg.norm(helix_tangent)
+    first_derivative = 1.60 * coil.transition * vertical_tangent
+    second_derivative = (
+        6.0 * displacement
+        - 4.0 * first_derivative
+        - 2.0 * 1.45 * coil.transition * helix_tangent
+    )
+    curvature_numerator = np.linalg.norm(
+        np.cross(first_derivative, second_derivative)
+    )
+    if curvature_numerator <= np.finfo(float).eps:
+        return math.inf
+    return float(np.linalg.norm(first_derivative) ** 3 / curvature_numerator)
+
+
 def derive_drawing_dimensions(design: AntennaDesign) -> AntennaDrawingDimensions:
     """Derive all fabrication dimensions used by :func:`export_drawing`.
 
@@ -103,6 +143,11 @@ def derive_drawing_dimensions(design: AntennaDesign) -> AntennaDrawingDimensions
             continue
 
         coil = design.coils[index]
+        inside_radius = coil.radius - design.wire_radius
+        if inside_radius <= 0.0:
+            raise ValueError(
+                f"coils[{index}].radius must exceed wire_radius for a positive mandrel diameter"
+            )
         alpha, middle_rotation, middle_rise = _coil_parameters(coil)
         coil_start = z
         coil_height = 2.0 * coil.transition + middle_rise
@@ -118,10 +163,13 @@ def derive_drawing_dimensions(design: AntennaDesign) -> AntennaDrawingDimensions
                 z_end=coil_end,
                 radius=coil.radius,
                 diameter=2.0 * coil.radius,
+                inside_radius=inside_radius,
+                inside_diameter=2.0 * inside_radius,
                 center_x=-coil.radius,
                 turns=int(coil.turns),
                 pitch=coil.pitch,
                 transition=coil.transition,
+                transition_radius=_transition_radius_at_axis(coil),
                 transition_offset=coil.transition_offset,
                 handedness=coil.handedness.upper(),
                 alpha_deg=math.degrees(alpha),
@@ -340,6 +388,11 @@ def _mm(value: float) -> float:
     return value / MM
 
 
+def _font(size: float) -> float:
+    """Scale the former A4 typography for legible A3 printing."""
+    return size * A3_FONT_SCALE
+
+
 def _dimension_vertical(
     ax, x: float, y0: float, y1: float, label: str, ref_x: float = 0.0, *, rotate_text: bool = True
 ):
@@ -352,9 +405,9 @@ def _dimension_vertical(
         arrowprops={"arrowstyle": "<->", "linewidth": 0.7, "shrinkA": 0, "shrinkB": 0},
     )
     if rotate_text:
-        ax.text(x + 1.6, (y0 + y1) / 2.0, label, rotation=90, va="center", fontsize=7)
+        ax.text(x + 1.6, (y0 + y1) / 2.0, label, rotation=90, va="center", fontsize=_font(7))
     else:
-        ax.text(x + 1.8, (y0 + y1) / 2.0, label, va="center", fontsize=7)
+        ax.text(x + 1.8, (y0 + y1) / 2.0, label, va="center", fontsize=_font(7))
 
 
 def _dimension_horizontal(ax, x0: float, x1: float, y: float, label: str):
@@ -364,15 +417,25 @@ def _dimension_horizontal(ax, x0: float, x1: float, y: float, label: str):
         xytext=(x1, y),
         arrowprops={"arrowstyle": "<->", "linewidth": 0.7, "shrinkA": 0, "shrinkB": 0},
     )
-    ax.text((x0 + x1) / 2.0, y + 2.0, label, ha="center", va="bottom", fontsize=7)
+    ax.annotate(
+        label,
+        xy=(x0, y),
+        xytext=(-8, 8),
+        textcoords="offset points",
+        ha="right",
+        va="bottom",
+        fontsize=_font(5.8),
+        bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "0.65", "alpha": 0.96},
+        arrowprops={"arrowstyle": "-", "linewidth": 0.55, "color": "0.35"},
+    )
 
 
 def _setup_orthographic_axis(ax, xlabel: str, ylabel: str, title: str) -> None:
-    ax.set_title(title, fontsize=10, fontweight="bold")
-    ax.set_xlabel(xlabel, fontsize=8)
-    ax.set_ylabel(ylabel, fontsize=8)
+    ax.set_title(title, fontsize=_font(10), fontweight="bold")
+    ax.set_xlabel(xlabel, fontsize=_font(8))
+    ax.set_ylabel(ylabel, fontsize=_font(8))
     ax.grid(True, linewidth=0.35, alpha=0.35)
-    ax.tick_params(labelsize=7)
+    ax.tick_params(labelsize=_font(7))
     ax.set_aspect("equal", adjustable="datalim")
 
 
@@ -410,16 +473,41 @@ def _draw_top_view(ax, design: AntennaDesign, path_mm: np.ndarray) -> None:
     dims = derive_drawing_dimensions(design)
     ax.plot(path_mm[:, 0], path_mm[:, 1], linewidth=1.0)
 
-    # Nominal coil circles make the construction radii obvious even though the
-    # smooth transitions prevent the complete projected centerline from being a circle.
+    # Dashed circles are wire centerlines; dotted circles are the mandrels/coil IDs.
+    # Labels live in a reserved axes-relative lane and use leaders, so they cannot
+    # obscure the projected antenna geometry.
     theta = np.linspace(0.0, 2.0 * np.pi, 240)
     for coil in dims.coils:
         cx = _mm(coil.center_x)
         r = _mm(coil.radius)
+        inside_r = _mm(coil.inside_radius)
         ax.plot(cx + r * np.cos(theta), r * np.sin(theta), linestyle="--", linewidth=0.65)
+        ax.plot(
+            cx + inside_r * np.cos(theta),
+            inside_r * np.sin(theta),
+            linestyle=":",
+            linewidth=0.8,
+            color="0.25",
+        )
         ax.plot((cx,), (0.0,), marker="+", markersize=5)
-        label_y = r + 2.0 if coil.index % 2 else -r - 6.0
-        ax.text(cx, label_y, f"C{coil.index} R{r:.2f}", ha="center", fontsize=7)
+        ax.annotate(
+            "",
+            xy=(cx, -inside_r),
+            xytext=(cx, inside_r),
+            arrowprops={"arrowstyle": "<->", "linewidth": 0.65, "shrinkA": 0, "shrinkB": 0},
+        )
+        ax.annotate(
+            f"C{coil.index} MANDREL ID {_mm(coil.inside_diameter):.2f} mm",
+            xy=(cx, inside_r),
+            xycoords="data",
+            xytext=(0.03, 0.96 - 0.12 * (coil.index - 1)),
+            textcoords="axes fraction",
+            ha="left",
+            va="top",
+            fontsize=_font(5.5),
+            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "edgecolor": "0.65", "alpha": 0.96},
+            arrowprops={"arrowstyle": "-", "linewidth": 0.6, "color": "0.35"},
+        )
 
     hub_radius = _mm(dims.hub_radius)
     ax.plot(hub_radius * np.cos(theta), hub_radius * np.sin(theta), linewidth=1.0)
@@ -442,11 +530,10 @@ def _draw_top_view(ax, design: AntennaDesign, path_mm: np.ndarray) -> None:
 def _draw_dimensions(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> None:
     radial_extent = _mm(dims.radial_horizontal_radius)
     straight_x = radial_extent + 9.0
-    coil_x = radial_extent + 22.0
     overall_x = radial_extent + 43.0
 
-    # Dimension the three straight sections in one readable chain. Coil heights
-    # use a separate lane because their short axial spans make rotated labels clash.
+    # Dimension the straight sections in one readable chain. Coil construction
+    # details are grouped in the Y-Z view where they do not compete with this chain.
     for index, straight_range in enumerate(dims.straight_ranges):
         _dimension_vertical(
             ax,
@@ -454,16 +541,6 @@ def _draw_dimensions(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) 
             _mm(straight_range[0]),
             _mm(straight_range[1]),
             f"S{index + 1} {_mm(straight_range[1]-straight_range[0]):.2f}",
-        )
-
-    for coil in dims.coils:
-        _dimension_vertical(
-            ax,
-            coil_x,
-            _mm(coil.z_start),
-            _mm(coil.z_end),
-            f"C{coil.index} H {_mm(coil.axial_height):.2f}",
-            rotate_text=False,
         )
 
     _dimension_vertical(
@@ -475,25 +552,62 @@ def _draw_dimensions(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) 
     )
 
     for coil in dims.coils:
+        center_x = _mm(coil.center_x)
+        inside_radius = _mm(coil.inside_radius)
         _dimension_horizontal(
             ax,
-            -_mm(2.0 * coil.radius),
-            0.0,
+            center_x - inside_radius,
+            center_x + inside_radius,
             _mm((coil.z_start + coil.z_end) / 2.0),
-            f"C{coil.index} DIA {_mm(coil.diameter):.2f}",
+            f"C{coil.index} ID {_mm(coil.inside_diameter):.2f}",
         )
 
-    apex_z = _mm(dims.radial_virtual_apex_z)
-    tip_z = _mm(dims.radial_tip_z)
-    tip_x = _mm(dims.radial_horizontal_radius)
-    ax.plot((0.0, tip_x), (apex_z, apex_z), linestyle="--", linewidth=0.55)
-    ax.text(
-        tip_x * 0.48,
-        (apex_z + tip_z) / 2.0 - 4.0,
-        f"RADIAL L {_mm(design.radial_length):.2f} nominal\n"
-        f"{design.radial_angle_deg:.2f} deg below horizontal",
-        fontsize=7,
-        ha="center",
+
+def _draw_yz_manufacturing_callouts(
+    ax, design: AntennaDesign, dims: AntennaDrawingDimensions
+) -> None:
+    """Put small, direct coil and radial dimensions in Y-Z whitespace."""
+    leader = {"arrowstyle": "-", "linewidth": 0.6, "color": "0.35"}
+
+    callout_y = np.linspace(0.86, 0.50, max(len(dims.coils), 2))
+    for coil, y_fraction in zip(reversed(dims.coils), callout_y):
+        ax.annotate(
+            f"C{coil.index}  R {_mm(coil.radius):.2f} mm   PITCH {_mm(coil.pitch):.2f} mm",
+            xy=(_mm(coil.join_y), _mm(coil.z_start + coil.transition)),
+            xycoords="data",
+            xytext=(0.68, float(y_fraction)),
+            textcoords="axes fraction",
+            ha="left",
+            va="top",
+            fontsize=_font(5.2),
+            arrowprops=leader,
+        )
+        ax.annotate(
+            f"C{coil.index}  TRANS-R {_mm(coil.transition_radius):.2f} mm",
+            xy=(0.0, _mm(coil.z_start)),
+            xycoords="data",
+            xytext=(0.68, float(y_fraction) - 0.065),
+            textcoords="axes fraction",
+            ha="left",
+            va="top",
+            fontsize=_font(5.2),
+            arrowprops={"arrowstyle": "->", "linewidth": 0.65, "color": "0.25"},
+        )
+
+    # Use the negative-Y radial so the leader and its text remain on the same side.
+    ax.annotate(
+        (
+            f"RADIALS {design.radial_count} x L {_mm(design.radial_length):.2f} mm nominal\n"
+            f"ANGLE {design.radial_angle_deg:.2f} deg below horizontal"
+        ),
+        xy=(-_mm(dims.radial_horizontal_radius), _mm(dims.radial_tip_z)),
+        xycoords="data",
+        xytext=(0.03, 0.14),
+        textcoords="axes fraction",
+        ha="left",
+        va="bottom",
+        fontsize=_font(5.2),
+        arrowprops=leader,
     )
 
 
@@ -511,52 +625,55 @@ def _draw_table(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> No
         f"Modeled radial cylinder: {_mm(dims.radial_model_length):.3f} mm; "
         f"virtual apex Z {_mm(dims.radial_virtual_apex_z):.3f} mm"
     )
-    ax.text(0.0, 0.98, "GLOBAL DIMENSIONS", fontsize=9, fontweight="bold", va="top", transform=ax.transAxes)
-    ax.text(0.0, 0.86, global_text, fontsize=7.2, va="top", family="monospace", transform=ax.transAxes)
+    ax.text(0.0, 0.98, "GLOBAL DIMENSIONS", fontsize=_font(9), fontweight="bold", va="top", transform=ax.transAxes)
+    ax.text(0.0, 0.86, global_text, fontsize=_font(7.2), va="top", family="monospace", transform=ax.transAxes)
 
     coil_lines = [
-        "Coil   Hand Turns   Radius    Pitch    Trans.   Offset   alpha   helix   rise    height",
-        "                   mm        mm       mm       mm       deg     deg     mm      mm",
+        "Coil Hand Turns  Ctr R  Mandrel ID  Pitch  Trans.  Bend R  Offset  alpha  helix  rise  height",
+        "                  mm       mm       mm     mm      mm      mm     deg    deg    mm     mm",
     ]
     for coil in dims.coils:
         coil_lines.append(
             f"C{coil.index:<4}  {coil.handedness:<3}  {coil.turns:>3}   "
-            f"{_mm(coil.radius):>7.3f}  {_mm(coil.pitch):>7.3f}  "
-            f"{_mm(coil.transition):>7.3f}  {_mm(coil.transition_offset):>7.3f}  "
+            f"{_mm(coil.radius):>7.3f}  {_mm(coil.inside_diameter):>9.3f}  {_mm(coil.pitch):>7.3f}  "
+            f"{_mm(coil.transition):>7.3f}  {_mm(coil.transition_radius):>7.3f}  "
+            f"{_mm(coil.transition_offset):>7.3f}  "
             f"{coil.alpha_deg:>6.2f}  {coil.middle_rotation_deg:>6.2f}  "
             f"{_mm(coil.middle_rise):>6.3f}  {_mm(coil.axial_height):>7.3f}"
         )
 
-    ax.text(0.45, 0.98, "COIL DETAILS", fontsize=9, fontweight="bold", va="top", transform=ax.transAxes)
-    ax.text(0.45, 0.86, "\n".join(coil_lines), fontsize=6.9, va="top", family="monospace", transform=ax.transAxes)
+    ax.text(0.45, 0.98, "COIL DETAILS", fontsize=_font(9), fontweight="bold", va="top", transform=ax.transAxes)
+    ax.text(0.45, 0.86, "\n".join(coil_lines), fontsize=_font(6.9), va="top", family="monospace", transform=ax.transAxes)
 
     notes = (
-        "NOTES: Dimensions are centerline geometry unless stated otherwise. "
-        "Coil radius is measured from the helix centerline. The smooth inlet/outlet "
+        "NOTES: MANDREL ID and ID dimensions are the clear inside coil diameter; "
+        "coil centerline radius is retained as CTR R. TRANS-R / Bend R is the local "
+        "radius of curvature where the Hermite transition joins the straight wire; "
+        "the transition's curvature varies away from that point. The smooth inlet/outlet "
         "transitions reproduce the simulation's cubic-Hermite geometry. Radial length "
         "is the nominal virtual-apex-to-tip dimension; the current CAD starts the radial "
         "solid inside the ground hub for overlap. The dashed feed region is the modeled "
         "lumped-port geometry and should be translated into the intended connector/insulator "
         "construction before fabrication."
     )
-    ax.text(0.0, 0.12, notes, fontsize=6.8, va="bottom", wrap=True, transform=ax.transAxes)
+    ax.text(0.0, 0.12, notes, fontsize=_font(6.8), va="bottom", wrap=True, transform=ax.transAxes)
 
 
 def _draw_unavailable_plot(ax, title: str) -> None:
     """Draw a consistent placeholder when no solved RF result was supplied."""
-    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.set_title(title, fontsize=_font(9), fontweight="bold")
     ax.text(
         0.5,
         0.5,
         "Solved simulation result not supplied",
         ha="center",
         va="center",
-        fontsize=7,
+        fontsize=_font(7),
         color="0.4",
         transform=ax.transAxes,
     )
     ax.grid(True, linewidth=0.35, alpha=0.35)
-    ax.tick_params(labelsize=7)
+    ax.tick_params(labelsize=_font(7))
 
 
 def _result_frequency_hz(result: SimulationResult) -> float | None:
@@ -574,16 +691,16 @@ def _draw_s11(ax, result: SimulationResult | None) -> None:
     """Draw the solved reflection-coefficient sweep."""
     if result is None:
         _draw_unavailable_plot(ax, "S11 sweep")
-        ax.set_xlabel("Frequency (MHz)", fontsize=8)
-        ax.set_ylabel("S11 (dB)", fontsize=8)
+        ax.set_xlabel("Frequency (MHz)", fontsize=_font(8))
+        ax.set_ylabel("S11 (dB)", fontsize=_font(8))
         return
 
     frequencies = np.asarray(result.frequencies, dtype=float).reshape(-1)
     s11_db = np.asarray(result.s11_db, dtype=float).reshape(-1)
     if not frequencies.size or frequencies.size != s11_db.size:
         _draw_unavailable_plot(ax, "S11 sweep")
-        ax.set_xlabel("Frequency (MHz)", fontsize=8)
-        ax.set_ylabel("S11 (dB)", fontsize=8)
+        ax.set_xlabel("Frequency (MHz)", fontsize=_font(8))
+        ax.set_ylabel("S11 (dB)", fontsize=_font(8))
         return
 
     frequency_mhz = frequencies / 1e6
@@ -601,12 +718,12 @@ def _draw_s11(ax, result: SimulationResult | None) -> None:
             label="lobe frequency",
         )
 
-    ax.set_title("S11 sweep", fontsize=9, fontweight="bold")
-    ax.set_xlabel("Frequency (MHz)", fontsize=8)
-    ax.set_ylabel("S11 (dB)", fontsize=8)
+    ax.set_title("S11 sweep", fontsize=_font(9), fontweight="bold")
+    ax.set_xlabel("Frequency (MHz)", fontsize=_font(8))
+    ax.set_ylabel("S11 (dB)", fontsize=_font(8))
     ax.grid(True, linewidth=0.35, alpha=0.35)
-    ax.tick_params(labelsize=7)
-    ax.legend(fontsize=6.5, loc="best")
+    ax.tick_params(labelsize=_font(7))
+    ax.legend(fontsize=_font(6.5), loc="best")
 
 
 def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
@@ -662,38 +779,113 @@ def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
     return phi_values, gain_values
 
 
-def _draw_horizon_lobe(ax, result: SimulationResult | None) -> None:
-    """Draw the XY/horizon realized-gain lobe on a polar axis."""
+def _xz_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
+    """Return a closed XZ elevation cut from a sampled 3-D far field.
+
+    Cut angle zero is +Z, 90 degrees is +X, 180 degrees is -Z, and
+    270 degrees is -X.
+    """
+    farfield = getattr(result, "farfield_3d", None)
+    if farfield is None:
+        raise ValueError("far-field data is unavailable")
+
+    theta = np.asarray(farfield.theta, dtype=float)
+    phi = np.asarray(farfield.phi, dtype=float)
+    norm_e = np.asarray(farfield.normE)
+    try:
+        theta, phi, norm_e = np.broadcast_arrays(theta, phi, norm_e)
+    except ValueError as error:
+        raise ValueError("far-field coordinate and value shapes do not match") from error
+
+    import emerge as em
+
+    gain_db = 20.0 * np.log10(
+        np.maximum(np.abs(norm_e) / em.lib.EISO, 1e-12)
+    )
+    finite = np.isfinite(theta) & np.isfinite(phi) & np.isfinite(gain_db)
+    if not np.any(finite):
+        raise ValueError("far-field data is empty")
+
+    theta_values = np.unique(np.round(theta[finite], decimals=12))
+    theta_values = theta_values[
+        (theta_values >= -1e-10) & (theta_values <= np.pi + 1e-10)
+    ]
+    theta_values = np.unique(np.clip(theta_values, 0.0, np.pi))
+    if theta_values.size < 2:
+        raise ValueError("far-field elevation data is incomplete")
+
+    def meridian_gain(target_phi: float) -> np.ndarray:
+        values = []
+        for theta_value in theta_values:
+            candidates = finite & np.isclose(
+                theta,
+                theta_value,
+                rtol=0.0,
+                atol=1e-10,
+            )
+            candidate_phi = phi[candidates]
+            candidate_gain = gain_db[candidates]
+            distance = np.abs(
+                np.angle(np.exp(1j * (candidate_phi - target_phi)))
+            )
+            values.append(float(candidate_gain[int(np.argmin(distance))]))
+        return np.asarray(values)
+
+    positive_x = meridian_gain(0.0)
+    negative_x = meridian_gain(np.pi)
+    cut_angles = np.concatenate(
+        (theta_values, 2.0 * np.pi - theta_values[-2::-1])
+    )
+    cut_gain = np.concatenate((positive_x, negative_x[-2::-1]))
+    return cut_angles, cut_gain
+
+
+def _draw_gain_lobes(ax, result: SimulationResult | None) -> None:
+    """Draw XY/horizon and XZ/elevation gain lobes on one polar axis."""
     if result is None:
-        _draw_unavailable_plot(ax, "XY/horizon gain lobe")
+        _draw_unavailable_plot(ax, "XY and XZ gain lobes")
         return
     try:
-        phi, gain_db = _horizon_gain(result)
+        phi, xy_gain_db = _horizon_gain(result)
+        xz_angle, xz_gain_db = _xz_gain(result)
     except (AttributeError, TypeError, ValueError):
-        _draw_unavailable_plot(ax, "XY/horizon gain lobe")
+        _draw_unavailable_plot(ax, "XY and XZ gain lobes")
         return
 
-    peak_gain = float(np.nanmax(gain_db))
+    all_gain_db = np.concatenate((xy_gain_db, xz_gain_db))
+    peak_gain = float(np.nanmax(all_gain_db))
     radial_floor = max(-40.0, float(math.floor(peak_gain - 30.0)))
     if radial_floor >= peak_gain:
         radial_floor = float(math.floor(peak_gain - 10.0))
     radial_ceiling = float(math.ceil(peak_gain + 1.0))
-    ax.plot(phi, np.maximum(gain_db, radial_floor), linewidth=1.1)
+    ax.plot(
+        phi,
+        np.maximum(xy_gain_db, radial_floor),
+        linewidth=1.1,
+        label="XY/horizon",
+    )
+    ax.plot(
+        xz_angle,
+        np.maximum(xz_gain_db, radial_floor),
+        linewidth=1.1,
+        label="XZ/elevation",
+    )
     ax.set_rlim(radial_floor, radial_ceiling)
     frequency_hz = _result_frequency_hz(result)
     frequency_text = (
         f" at {frequency_hz / 1e6:g} MHz" if frequency_hz is not None else ""
     )
     ax.set_title(
-        f"XY/horizon realized gain{frequency_text} (dBi)",
-        fontsize=9,
+        f"XY and XZ realized gain{frequency_text} (dBi)",
+        fontsize=_font(9),
         fontweight="bold",
         pad=12,
     )
-    ax.set_theta_zero_location("E")
-    ax.set_theta_direction(1)
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
     ax.grid(True, linewidth=0.35, alpha=0.35)
-    ax.tick_params(labelsize=6.5)
+    ax.tick_params(labelsize=_font(6.5))
+    ax.legend(fontsize=_font(6.2), loc="upper left", bbox_to_anchor=(1.02, 1.0))
 
 
 def export_drawing(
@@ -705,11 +897,11 @@ def export_drawing(
     points_per_turn: int = 160,
     dpi: int = 300,
 ) -> Path:
-    """Export an A4-landscape fabrication sheet as PDF, SVG, or PNG.
+    """Export an A3-landscape fabrication sheet as PDF, SVG, or PNG.
 
     Pass a solved ``SimulationResult`` to include its S11 sweep and sampled
-    XY/horizon realized-gain lobe. Geometry-only callers remain supported and
-    receive clearly marked placeholders for those two plots.
+    XY/horizon and XZ/elevation realized-gain lobes. Geometry-only callers
+    remain supported and receive clearly marked placeholders for those plots.
     """
     design.validate()
     destination = Path(output)
@@ -731,7 +923,7 @@ def export_drawing(
     # Build the figure directly instead of going through pyplot.  Exporting a
     # drawing is non-interactive and must not require a working Tk/Qt desktop
     # backend (for example in CI or on a headless solver machine).
-    figure = Figure(figsize=(11.69, 8.27), constrained_layout=True)
+    figure = Figure(figsize=A3_LANDSCAPE_SIZE_INCHES, constrained_layout=True)
     grid = figure.add_gridspec(4, 6, height_ratios=(0.18, 2.2, 1.2, 1.45))
     ax_title = figure.add_subplot(grid[0, :])
     ax_xz = figure.add_subplot(grid[1, 0:2])
@@ -748,7 +940,7 @@ def export_drawing(
         title or "Loaded Antenna Fabrication Drawing",
         ha="center",
         va="center",
-        fontsize=14,
+        fontsize=_font(14),
         fontweight="bold",
         transform=ax_title.transAxes,
     )
@@ -757,8 +949,9 @@ def export_drawing(
     _draw_side_view(ax_yz, design, path_mm, "yz")
     _draw_top_view(ax_xy, design, path_mm)
     _draw_dimensions(ax_xz, design, dims)
+    _draw_yz_manufacturing_callouts(ax_yz, design, dims)
     _draw_s11(ax_s11, result)
-    _draw_horizon_lobe(ax_lobe, result)
+    _draw_gain_lobes(ax_lobe, result)
     _draw_table(ax_table, design, dims)
 
     figure.savefig(destination, dpi=dpi)

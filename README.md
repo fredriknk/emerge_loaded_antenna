@@ -115,8 +115,9 @@ solve.
 
 ### Fabrication drawing
 
-Pass a solved result with far-field data to include the S11 sweep and the
-XY/horizon gain lobe on the dimensioned work drawing:
+The work drawing uses A3 landscape for readable dimensions and plots. Pass a
+solved result with far-field data to include the S11 sweep and overlaid
+XY/horizon and XZ/elevation gain lobes:
 
 ```python
 from emerge_loaded_antenna.drawing import export_drawing
@@ -136,6 +137,13 @@ export_drawing(
 Calling `export_drawing()` without `result` still produces the fabrication
 geometry and dimensions, with labeled placeholders for the RF plots. The
 command-line drawing exporter accepts design JSON and writes PDF, SVG, or PNG.
+Coil fabrication dimensions use the clear inside diameter (the mandrel
+diameter), while the coil centerline radius remains listed separately. The
+Y-Z view uses direct leaders for each coil's centerline radius, pitch, and
+transition bend radius, with the radial length and angle kept clear of the X-Z
+geometry. The transition bend radius is the local curvature radius where the
+cubic-Hermite transition joins the straight wire; the spline does not have one
+constant radius along its full length.
 
 ### Optimizer Adapter
 
