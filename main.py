@@ -23,6 +23,7 @@ from emerge_loaded_antenna import (
     simulate,
 )
 from emerge_loaded_antenna.drawing import export_drawing
+from emerge_loaded_antenna.formers import export_coil_formers
 
 MHz = 1e6
 mm = 1e-3
@@ -32,6 +33,9 @@ F0 = 869.5*MHz
 # Tracked example geometry evaluated at this script's target frequency.
 DESIGN = load_reference_design(F0)
 PDF_NAME = "my_manual_antenna.pdf"
+FORMER_NAME = "coil_formers.step"
+
+
 trans = 6*mm
 DESIGN = replace(
     DESIGN,
@@ -45,14 +49,15 @@ DESIGN = replace(
 print(DESIGN)
 
 RUN_SOLVER = True
-SHOW_GEOMETRY = True
+SHOW_GEOMETRY = False
 SHOW_COIL_PREVIEW = False
 SHOW_MESH = False
 SHOW_3D_FARFIELD = False
+EXPORT_FORMERS = True
 FARFIELD_DB_FLOOR = -30.0
 
 OPTIONS = SimulationOptions(
-    sweep=FrequencySweep(center=F0, span=50*MHz, points=5),
+    sweep=FrequencySweep(center=F0, span=50*MHz, points=20),
     mesh=MeshSettings(
         wire_sections=6,
         antenna_size_factor=3.0,
@@ -70,6 +75,7 @@ OPTIONS = SimulationOptions(
     show_mesh=SHOW_MESH,
     show_coil_preview=SHOW_COIL_PREVIEW,
     verbose=True,
+    solver= "cudss"
 )
 
 
@@ -237,6 +243,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    
+    if EXPORT_FORMERS:
+        export_coil_formers(
+            DESIGN,
+            FORMER_NAME,
+            extra_length=5 * mm,
+            groove_clearance=0.1 * mm,
+            spacing=5 * mm,
+        )
+        
+    print(f"Exported coil formers to {FORMER_NAME}")
+    
     result = simulate(DESIGN, replace(OPTIONS, solver=args.solver))
     export_drawing(
         DESIGN,

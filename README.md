@@ -145,6 +145,45 @@ geometry. The transition bend radius is the local curvature radius where the
 cubic-Hermite transition joins the straight wire; the spline does not have one
 constant radius along its full length.
 
+### Printable coil-winding formers
+
+Grooved winding formers can be exported independently of the simulation:
+
+```python
+from emerge_loaded_antenna.formers import export_coil_formers
+
+export_coil_formers(design, "coil-formers.step")
+export_coil_formers(design, "coil-formers.stl")
+```
+
+Each cylinder is 5 mm longer than its coil by default, with 2.5 mm above and
+below the winding. The winding former's blank outside diameter is the coil
+centerline diameter. The exact transition-and-helix wire path is swept and
+Boolean-subtracted from the blank, leaving a half-round winding groove that
+continues through both end faces. A 0.1 mm radial printing clearance is
+included by default and can be changed with `groove_clearance=...`.
+
+Four short transverse witness notches beside the wire path identify the start
+and end of both Hermite transitions. Each coil also gets an inside-diameter sizing
+mandrel with a shallow 0.2 mm path indication for manually correcting
+spring-back. Set `sizing_groove_depth=0` for a smooth sizing mandrel, or
+`include_sizing_mandrels=False` to omit it. All tools are separate solids in
+the same file, spaced 5 mm apart.
+
+The standalone command accepts a saved design or optimizer-result JSON:
+
+```powershell
+python -m emerge_loaded_antenna.formers design.json coil-formers.step
+python -m emerge_loaded_antenna.formers design.json coil-formers.stl `
+  --groove-clearance-mm 0.1 `
+  --sizing-groove-depth-mm 0.2 `
+  --marker-depth-mm 0.15
+```
+
+Former construction uses an independent Gmsh model and is never invoked by
+`build_model()` or `simulate()`, so these printable solids cannot enter the EM
+model.
+
 ### Optimizer Adapter
 
 ```python
