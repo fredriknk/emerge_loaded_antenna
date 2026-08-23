@@ -170,23 +170,18 @@ Supply any current-schema design or campaign result with
 `--warm-start`; its physical dimensions, coil count and turn counts are used
 as written unless explicitly overridden by the geometry or topology flags.
 
-Set a fixed physical wire diameter or ground-radial angle directly from the
-optimizer command line:
+Set a fixed physical wire diameter directly from the optimizer command line:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
     --wire-diameter-mm 1.6 `
-    --radial-angle-deg 30 `
     --hours 12
 ```
 
 `--wire-diameter-mm` replaces the diameter inherited from the wavelength-scaled
-reference or warm start and is used by the wire-aware search bounds.
-`--radial-angle-deg` fixes the radial angle for every candidate and removes it
-from the search space. When the angle flag is omitted, radial angle retains its
-existing `5-75 degree` optimizer range, expanded when necessary to enclose a
-warm start. Both flags take precedence over `--warm-start`; topology can still
-be selected with `--coil-count`, `--coil-counts`, or `--turn-cases`.
+reference or warm start and is used by the wire-aware search bounds. It takes
+precedence over `--warm-start`; topology can still be selected with
+`--coil-count`, `--coil-counts`, or `--turn-cases`.
 
 When a topology override changes the coil count, the generated seed uses
 electrical-length priors: a zero-coil radiator starts at `0.25 lambda`; a
@@ -278,11 +273,9 @@ three simulations by default, so `--hours` remains an estimate. Progress and
 result files report optimizer candidates and physical simulations separately.
 
 The broad search optimizes every straight length, one pitch and radius shared
-by all coils, radial length, and—unless fixed with `--radial-angle-deg`—radial
-angle. Thus a design with N >= 1 coils normally has only N+5 continuous
-variables; the zero-coil case normally has three. Fixing the radial angle
-reduces either count by one. After the first coil, each added coil introduces
-only one additional straight length. S11 is
+by all coils, radial length, and radial angle. Thus a design with N >= 1 coils
+has only N+5 continuous variables; the zero-coil case has three. After the first
+coil, each added coil introduces only one additional straight length. S11 is
 constrained at the lower edge, center and upper edge of the requested matching
 band. Every run receives the synthesized or supplied design as `x0`; each
 candidate is flushed to CSV and every new global best is atomically
@@ -405,9 +398,15 @@ needed.
 
 For best optimizer convergence, first use the shared-geometry broad campaign,
 then fine-tune its winner. `--pattern directional --target-theta ...
---target-phi ...` selects a fixed beam direction; `--pattern peak` restores
-unrestricted maximum-gain optimization. Run `--help` for all objective weights
-and budget controls.
+--target-phi ...` selects the lobe direction to optimize. Spherical theta is
+zero on +Z and 90 degrees on the horizon; phi is the azimuth, with zero on +X
+and 90 degrees on +Y. `--pattern peak` restores unrestricted maximum-gain
+optimization.
+
+Directional mode currently maximizes gain at the single requested theta/phi
+sample. It does not yet optimize half-power beamwidth. `--angular-step` controls
+the far-field sampling resolution (2 degrees by default, at most 10 degrees),
+not a beamwidth goal. Run `--help` for all objective weights and budget controls.
 
 ### Final verification
 
