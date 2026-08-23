@@ -27,6 +27,7 @@ from .convergence import (
     validate_convergence_certificate,
 )
 from .geometry import AntennaPath, CompositeCurve, build_centerline
+from .jigs import JigModelSettings, export_jig_models
 from .optimize import (
     ConfirmationCallback,
     DesignSpace,
@@ -73,6 +74,7 @@ __all__ = [
     "FrequencySweep",
     "GainMatchObjective",
     "IncumbentConfirmation",
+    "JigModelSettings",
     "MeshSettings",
     "ModelArtifacts",
     "OpenRegionSettings",
@@ -84,6 +86,7 @@ __all__ = [
     "build_model",
     "design_fingerprint",
     "design_from_dict",
+    "export_jig_models",
     "load_convergence_certificate",
     "load_design",
     "load_reference_design",

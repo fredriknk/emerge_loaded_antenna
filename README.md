@@ -67,6 +67,8 @@ Command-line options use MHz, millimetres, and degrees where stated.
 - Multi-topology, multi-seed optimization campaigns with global and fine modes.
 - Dimensioned PDF, SVG, or PNG fabrication sheets with optional S11 and
   horizon-pattern plots.
+- Printable grooved STL winding mandrels derived from each coil's wire size,
+  radius, pitch, and handedness.
 - Broadband matching penalties, height limits, horizon or directional pattern
   goals, optional beamwidth targeting, and repeat confirmation of incumbents.
 - Atomic progress artifacts, CSV evaluation logs, topology rankings, and JSON
@@ -429,10 +431,16 @@ at that requested direction, not necessarily 3 dB below the global peak.
 .\.venv\Scripts\python.exe .\main.py --solver auto
 ```
 
-The physical design and viewer switches are intentionally defined in the file
-so it can serve as a compact experiment script. It also exports
-`my_manual_antenna.pdf`, including S11 and the horizon lobe when a solve was
-performed. Closing an EMerge/Gmsh viewer continues execution.
+The complete physical antenna is declared directly in `main.py` with static
+`AntennaDesign` and `CoilDesign` values; it does not inherit dimensions from
+the packaged optimizer reference. The simulation, viewer, and export switches
+are also defined beside it so the file remains a compact experiment.
+
+With `EXPORT_DESIGN_SHEET` and `EXPORT_JIG_MODELS` enabled, the example writes
+`example_outputs/design_sheet.pdf`, `example_outputs/jig_models/jig_models.json`,
+and one winding-jig STL per coil. A solved run adds S11 and horizon gain to the
+sheet; a mesh-only run still creates the dimensions, placeholders, and jig
+models. Closing an EMerge/Gmsh viewer continues execution.
 
 ## Campaign optimizer
 
@@ -858,13 +866,16 @@ independent process and output location.
 ## Verify a winning design
 
 `verify_best.py` runs an optional coarse solve and a finer solve, compares the
-metrics, saves JSON, and plots the impedance and patterns:
+metrics, saves JSON, and plots the impedance and patterns. It can also generate
+the fabrication sheet and printable coil-winding jigs from the verified design:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\verify_best.py `
     optimization_results\868mhz_horizon\campaign_best.json `
     --frequency-points 13 `
-    --angular-step 0.5
+    --angular-step 0.5 `
+    --design-sheet `
+    --jig-models
 ```
 
 The solve frequency is inferred from optimizer metadata when possible. The
@@ -879,6 +890,17 @@ Verification output includes:
 - `s11_verified.png`;
 - `horizon_gain.png`;
 - `principal_plane_gain.png`.
+
+With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
+verification result, so the sheet includes dimensions, the verified S11 sweep,
+and the XY/horizon gain lobe.
+
+With `--jig-models`, it writes one binary STL winding mandrel per loading coil
+under `jig_models/`, plus `jig_models.json`. Each mandrel has a helical guide
+groove matching the coil pitch and handedness. Its groove-root radius accounts
+for wire radius and 0.15 mm print clearance; the manifest records the exact
+derived dimensions in millimetres. An unloaded design produces only the empty
+manifest because it has no coils to wind.
 
 Use `--show-model`, `--show-mesh`, or `--show-3d` for interactive inspection,
 and `--skip-coarse` when only the fine run is needed. A warning is emitted for
@@ -1002,6 +1024,7 @@ emerge_loaded_antenna/
   config.py          physical and numerical configuration
   geometry.py        continuous radiator centerline construction
   drawing.py         fabrication dimensions and PDF/SVG/PNG export
+  jigs.py            printable grooved coil-winding jig STL export
   simulation.py      EMerge model, solve, and far-field metrics
   optimize.py        reusable design spaces and objectives
   presets.py         tracked reference design and scaling

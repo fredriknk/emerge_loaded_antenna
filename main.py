@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-
-import numpy as np
+from pathlib import Path
 
 import emerge as em
+import numpy as np
 from emerge.plot import plot_ff, plot_sp, smith
 
 from emerge_loaded_antenna import (
+    SOLVER_CHOICES,
+    AntennaDesign,
+    CoilDesign,
     FrequencySweep,
     MeshSettings,
-    SOLVER_CHOICES,
     SimulationOptions,
-    load_reference_design,
+    export_jig_models,
     simulate,
 )
 from emerge_loaded_antenna.drawing import export_drawing
@@ -28,21 +30,34 @@ MHz = 1e6
 mm = 1e-3
 F0 = 869.5*MHz
 
-
-# Tracked example geometry evaluated at this script's target frequency.
-DESIGN = load_reference_design(F0)
-
-trans = 1*mm
-DESIGN = replace(
-    DESIGN,
+# Deliberately static example: every physical dimension is visible here and
+# remains unchanged if the packaged optimizer reference is updated.
+DESIGN = AntennaDesign(
     wire_radius=0.8*mm,
     radial_length=100*mm,
-    straight_lengths=np.array([96, 75, 112])*mm,
-    coils=(replace(DESIGN.coils[0], transition=trans),
-           replace(DESIGN.coils[1], transition=trans),
-    )
+    radial_angle_deg=30.1,
+    radial_count=4,
+    straight_lengths=(96*mm, 75*mm, 112*mm),
+    coils=(
+        CoilDesign(
+            radius=15.0*mm,
+            turns=1,
+            pitch=7.45*mm,
+            transition=1.0*mm,
+            handedness="RH",
+        ),
+        CoilDesign(
+            radius=9.75*mm,
+            turns=1,
+            pitch=6.08*mm,
+            transition=1.0*mm,
+            handedness="RH",
+        ),
+    ),
+    port_height=2.0*mm,
+    port_impedance=50.0,
 )
-print(DESIGN)
+DESIGN.validate()
 
 RUN_SOLVER = True
 SHOW_GEOMETRY = True
@@ -50,6 +65,9 @@ SHOW_COIL_PREVIEW = False
 SHOW_MESH = False
 SHOW_3D_FARFIELD = False
 FARFIELD_DB_FLOOR = -30.0
+EXPORT_DESIGN_SHEET = True
+EXPORT_JIG_MODELS = True
+EXAMPLE_OUTPUT = Path("example_outputs")
 
 OPTIONS = SimulationOptions(
     sweep=FrequencySweep(center=F0, span=50*MHz, points=5),
@@ -58,7 +76,7 @@ OPTIONS = SimulationOptions(
         antenna_size_factor=3.0,
         radial_size_factor=10.0,
         feed_size_factor=3.0,
-        curved_boundary_segments = 12,
+        curved_boundary_segments=12,
         wavelength_resolution=0.33,
         air_margin_wavelengths=0.25,
         preview_points_per_turn=20,
@@ -136,7 +154,7 @@ def report_s11(result) -> None:
     target = result.nearest_index(F0)
     print("----------------------------------------------------")
     print(
-        f"Nearest to 868   : {result.frequencies[target]/MHz:.3f} MHz, "
+        f"Nearest to target: {result.frequencies[target]/MHz:.3f} MHz, "
         f"{result.s11_db[target]:.3f} dB"
     )
     print(
@@ -235,23 +253,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def export_example_artifacts(result) -> tuple[Path | None, tuple[Path, ...]]:
+    """Export the example design sheet and printable coil winding jigs."""
+    sheet = None
+    jigs: tuple[Path, ...] = ()
+    if EXPORT_DESIGN_SHEET:
+        sheet = export_drawing(
+            DESIGN,
+            EXAMPLE_OUTPUT / "design_sheet.pdf",
+            result=result if result.solved else None,
+            title=f"{F0/MHz:g} MHz Static Example",
+        )
+        print(f"Design sheet     : {sheet.resolve()}")
+    if EXPORT_JIG_MODELS:
+        jigs = export_jig_models(DESIGN, EXAMPLE_OUTPUT / "jig_models")
+        print(
+            "Jig manifest     : "
+            f"{(EXAMPLE_OUTPUT / 'jig_models' / 'jig_models.json').resolve()}"
+        )
+        for path in jigs:
+            print(f"Jig model        : {path.resolve()}")
+    return sheet, jigs
+
+
 def main() -> None:
     args = parse_args()
+    print(DESIGN)
     result = simulate(DESIGN, replace(OPTIONS, solver=args.solver))
-    export_drawing(
-        DESIGN,
-        "my_manual_antenna.pdf",
-        result=result if result.solved else None,
-        title=f"{F0/MHz:g} MHz Prototype",
-    )
+    export_example_artifacts(result)
     if not result.solved:
         print("Done (mesh only).")
         return
     report_s11(result)
     report_farfield(result)
     print("Done.")
-
-
 
 if __name__ == "__main__":
     main()

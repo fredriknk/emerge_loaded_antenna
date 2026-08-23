@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 os.environ.setdefault("EMERGE_STD_LOGLEVEL", "WARNING")
@@ -15,16 +15,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from emerge_loaded_antenna import (
-    FrequencySweep,
-    MeshSettings,
     REFERENCE_DESIGN_FREQUENCY_HZ,
     SOLVER_CHOICES,
+    AntennaDesign,
+    FrequencySweep,
+    MeshSettings,
     SimulationOptions,
     SimulationResult,
+    export_jig_models,
     load_design,
     load_reference_design,
     simulate,
 )
+from emerge_loaded_antenna.drawing import export_drawing
 
 
 def gain_db(farfield) -> np.ndarray:
@@ -134,7 +137,7 @@ def save_plots(
     field = result.raw_data.field.find(freq=frequency_hz)
     faces = result.artifacts.farfield_selection
     origin = result.artifacts.farfield_origin
-    points = max(361, int(round(360/result.options.farfield_angular_step_deg)) + 1)
+    points = max(361, round(360/result.options.farfield_angular_step_deg) + 1)
     cuts = {
         "X-Z": field.farfield_2d(
             (0, 0, 1),
@@ -191,6 +194,44 @@ def show_3d(result: SimulationResult) -> None:
         opacity=0.7,
     )
     model.display.show()
+
+
+def export_fabrication_artifacts(
+    design: AntennaDesign,
+    result: SimulationResult,
+    output: Path,
+    frequency_hz: float,
+    *,
+    design_sheet: bool,
+    jig_models: bool,
+) -> dict:
+    """Generate requested fabrication files from the fine verification result."""
+    artifacts: dict[str, object] = {}
+    if design_sheet:
+        sheet = export_drawing(
+            design,
+            output / "design_sheet.pdf",
+            result=result,
+            title=f"{frequency_hz / 1e6:g} MHz Verified Antenna",
+        )
+        artifacts["design_sheet"] = sheet.name
+        print(f"Design sheet       : {sheet.resolve()}")
+    if jig_models:
+        jig_directory = output / "jig_models"
+        models = export_jig_models(design, jig_directory)
+        artifacts["jig_manifest"] = (
+            jig_directory / "jig_models.json"
+        ).relative_to(output).as_posix()
+        artifacts["jig_models"] = [
+            path.relative_to(output).as_posix() for path in models
+        ]
+        print(f"Jig model manifest : {(jig_directory / 'jig_models.json').resolve()}")
+        if models:
+            for path in models:
+                print(f"Jig model          : {path.resolve()}")
+        else:
+            print("Jig models         : no loading coils; manifest only")
+    return artifacts
 
 
 def options(
@@ -263,6 +304,16 @@ def parse_args() -> argparse.Namespace:
         help="open the final verification surface mesh in the Gmsh viewer",
     )
     parser.add_argument("--show-3d", action="store_true")
+    parser.add_argument(
+        "--design-sheet",
+        action="store_true",
+        help="export design_sheet.pdf with dimensions, S11, and horizon gain",
+    )
+    parser.add_argument(
+        "--jig-models",
+        action="store_true",
+        help="export printable grooved coil-winding jig STL files",
+    )
     args = parser.parse_args()
     if args.frequency_mhz is not None and (
         not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0
@@ -376,6 +427,17 @@ def main() -> None:
             print(f"{name:24s}: {value:+.3f} dB")
         if max(abs(value) for value in convergence.values()) > 0.5:
             print("WARNING: result changes by more than 0.5 dB; refine again.")
+
+    artifacts = export_fabrication_artifacts(
+        design,
+        fine_result,
+        args.output,
+        frequency_hz,
+        design_sheet=args.design_sheet,
+        jig_models=args.jig_models,
+    )
+    if artifacts:
+        payload["artifacts"] = artifacts
 
     report_path = args.output/"verification.json"
     report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

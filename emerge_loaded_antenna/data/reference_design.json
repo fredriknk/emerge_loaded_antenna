@@ -13,16 +13,14 @@
         "radius": 0.014994952864835962,
         "turns": 1,
         "pitch": 0.007457187656049569,
-        "transition": 0.001,
-        "transition_offset": 0.0007916666666666666,
+        "transition": 0.006,
         "handedness": "RH"
       },
       {
         "radius": 0.00976107960783077,
         "turns": 1,
         "pitch": 0.006089726971539542,
-        "transition": 0.001,
-        "transition_offset": 0.0007916666666666666,
+        "transition": 0.006,
         "handedness": "RH"
       }
     ],
