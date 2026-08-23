@@ -64,6 +64,10 @@ class CampaignTests(unittest.TestCase):
                 "72.5",
                 "--target-phi",
                 "35",
+                "--target-beamwidth-deg",
+                "70",
+                "--beamwidth-weight",
+                "2.5",
             ],
         ):
             args = parse_args()
@@ -72,6 +76,8 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(args.pattern, "directional")
         self.assertEqual(args.target_theta, 72.5)
         self.assertEqual(args.target_phi, 35.0)
+        self.assertEqual(args.target_beamwidth_deg, 70.0)
+        self.assertEqual(args.beamwidth_weight, 2.5)
 
     def test_cli_rejects_invalid_wire_diameter_and_lobe_angles(self):
         invalid_cases = (
@@ -89,6 +95,26 @@ class CampaignTests(unittest.TestCase):
             with (
                 self.subTest(flag=flag, value=value),
                 patch("sys.argv", ["optimize_gain.py", flag, value]),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args()
+
+    def test_beamwidth_goal_requires_directional_mode_and_valid_settings(self):
+        invalid_commands = (
+            ["--target-beamwidth-deg", "60"],
+            [
+                "--pattern",
+                "directional",
+                "--target-beamwidth-deg",
+                "0",
+            ],
+            ["--beamwidth-weight", "-1"],
+        )
+
+        for command in invalid_commands:
+            with (
+                self.subTest(command=command),
+                patch("sys.argv", ["optimize_gain.py", *command]),
                 self.assertRaises(SystemExit),
             ):
                 parse_args()
@@ -748,6 +774,16 @@ class CampaignTests(unittest.TestCase):
                     "0,1,3",
                     "--wire-diameter-mm",
                     "1.6",
+                    "--pattern",
+                    "directional",
+                    "--target-theta",
+                    "70",
+                    "--target-phi",
+                    "25",
+                    "--target-beamwidth-deg",
+                    "80",
+                    "--beamwidth-weight",
+                    "1.5",
                     "--seeds",
                     "2",
                     "--maxiter",
@@ -790,6 +826,12 @@ class CampaignTests(unittest.TestCase):
             self.assertTrue(
                 all(item["s11_margin_weight"] == 0.10 for item in objective_options)
             )
+            self.assertTrue(
+                all(item["target_beamwidth_deg"] == 80.0 for item in objective_options)
+            )
+            self.assertTrue(
+                all(item["beamwidth_weight"] == 1.5 for item in objective_options)
+            )
             self.assertEqual(
                 [item["coil_count"] for item in leaderboard],
                 [3, 1, 0],
@@ -812,6 +854,26 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(
                 best["simulation"]["search_bounds"]["wire_diameter_source"],
                 "command_line",
+            )
+            self.assertEqual(
+                best["simulation"]["objective"]["target_beamwidth_deg"],
+                80.0,
+            )
+            self.assertEqual(
+                best["simulation"]["objective"]["pattern_mode"],
+                "directional",
+            )
+            self.assertEqual(
+                best["simulation"]["objective"]["target_theta_deg"],
+                70.0,
+            )
+            self.assertEqual(
+                best["simulation"]["objective"]["target_phi_deg"],
+                25.0,
+            )
+            self.assertEqual(
+                best["simulation"]["objective"]["beamwidth_weight"],
+                1.5,
             )
             self.assertAlmostEqual(
                 best["simulation"]["search_bounds"]["maximum_height_wavelengths"],

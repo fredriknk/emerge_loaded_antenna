@@ -31,12 +31,16 @@ from emerge_loaded_antenna import (
     selected_open_region_configuration,
     validate_convergence_certificate,
 )
-from emerge_loaded_antenna.simulation import _configure_solver
+from emerge_loaded_antenna.simulation import (
+    _configure_solver,
+    _directional_beamwidths_deg,
+)
 
 
 def _robust_result(
     useful_gain_dbi: float = 4.0,
     s11_db: tuple[float, float, float] = (-12.0, -11.0, -10.5),
+    beamwidths_deg: tuple[float, float] = (60.0, 60.0),
 ):
     pattern = SimpleNamespace(
         horizon_p10_gain_dbi=useful_gain_dbi,
@@ -55,10 +59,87 @@ def _robust_result(
         s11_db_at=lambda frequency: float(values[1]),
         antenna_height=0.55,
         gain_db_at=lambda theta, phi: useful_gain_dbi,
+        directional_beamwidths_deg=lambda theta, phi: beamwidths_deg,
     )
 
 
 class DesignTests(unittest.TestCase):
+    def test_directional_beamwidths_measure_orthogonal_great_circle_cuts(self):
+        theta_axis = np.deg2rad(np.linspace(0.0, 180.0, 181))
+        phi_axis = np.deg2rad(np.linspace(-180.0, 180.0, 361))
+        theta, phi = np.meshgrid(theta_axis, phi_axis)
+        theta_offset = np.rad2deg(theta) - 90.0
+        phi_offset = np.rad2deg(np.angle(np.exp(1j*phi)))
+        gain_db = -3.0*((theta_offset/20.0)**2 + (phi_offset/40.0)**2)
+        farfield = SimpleNamespace(
+            theta=theta,
+            phi=phi,
+            normE=10**(gain_db/20.0),
+        )
+
+        elevation, azimuth = _directional_beamwidths_deg(
+            farfield,
+            theta_deg=90.0,
+            phi_deg=0.0,
+            angular_step_deg=1.0,
+        )
+
+        self.assertAlmostEqual(elevation, 40.0, places=6)
+        self.assertAlmostEqual(azimuth, 80.0, places=6)
+
+        target_theta = np.deg2rad(60.0)
+        target_phi = np.deg2rad(35.0)
+        direction = np.asarray(
+            (
+                np.sin(target_theta)*np.cos(target_phi),
+                np.sin(target_theta)*np.sin(target_phi),
+                np.cos(target_theta),
+            )
+        )
+        elevation_tangent = np.asarray(
+            (
+                np.cos(target_theta)*np.cos(target_phi),
+                np.cos(target_theta)*np.sin(target_phi),
+                -np.sin(target_theta),
+            )
+        )
+        azimuth_tangent = np.asarray(
+            (-np.sin(target_phi), np.cos(target_phi), 0.0)
+        )
+        points = np.stack(
+            (
+                np.sin(theta)*np.cos(phi),
+                np.sin(theta)*np.sin(phi),
+                np.cos(theta),
+            ),
+            axis=-1,
+        )
+        distance = np.arccos(np.clip(points@direction, -1.0, 1.0))
+        orientation = np.arctan2(
+            points@azimuth_tangent,
+            points@elevation_tangent,
+        )
+        elevation_offset = np.rad2deg(distance*np.cos(orientation))
+        azimuth_offset = np.rad2deg(distance*np.sin(orientation))
+        rotated_gain_db = -3.0*(
+            (elevation_offset/20.0)**2 + (azimuth_offset/40.0)**2
+        )
+        rotated_farfield = SimpleNamespace(
+            theta=theta,
+            phi=phi,
+            normE=10**(rotated_gain_db/20.0),
+        )
+
+        rotated_elevation, rotated_azimuth = _directional_beamwidths_deg(
+            rotated_farfield,
+            theta_deg=60.0,
+            phi_deg=35.0,
+            angular_step_deg=1.0,
+        )
+
+        self.assertAlmostEqual(rotated_elevation, 40.0, delta=1.0)
+        self.assertAlmostEqual(rotated_azimuth, 80.0, delta=1.0)
+
     def test_default_centerline_is_compact_and_returns_to_axis(self):
         design = AntennaDesign()
         path = build_centerline(design)
@@ -481,6 +562,37 @@ class DesignTests(unittest.TestCase):
                         expected_reward,
                     )
 
+    def test_directional_objective_penalizes_both_beamwidth_cuts(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        objective = RobustGainObjective(
+            space,
+            pattern_mode="directional",
+            target_theta_deg=70.0,
+            target_phi_deg=25.0,
+            target_beamwidth_deg=70.0,
+            beamwidth_weight=2.0,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            return_value=_robust_result(beamwidths_deg=(60.0, 90.0)),
+        ):
+            score = objective((220e-3,))
+
+        record = objective.best_record
+        self.assertAlmostEqual(score, 1.0)
+        self.assertEqual(record.metrics["elevation_beamwidth_deg"], 60.0)
+        self.assertEqual(record.metrics["azimuth_beamwidth_deg"], 90.0)
+        self.assertAlmostEqual(
+            record.metrics["beamwidth_error_deg"],
+            np.sqrt(250.0),
+        )
+        self.assertAlmostEqual(record.metrics["beamwidth_penalty"], 5.0)
+        self.assertEqual(record.metrics["pattern_penalty"], 0.0)
+
     def test_robust_objective_confirms_and_quarantines_new_incumbents(self):
         space = DesignSpace(
             AntennaDesign(),
@@ -600,6 +712,16 @@ class DesignTests(unittest.TestCase):
             RobustGainObjective(space, s11_margin_target_db=-9.0)
         with self.assertRaisesRegex(ValueError, "maximum_s11_db must be finite"):
             RobustGainObjective(space, maximum_s11_db=float("nan"))
+        with self.assertRaisesRegex(ValueError, "requires directional"):
+            RobustGainObjective(space, target_beamwidth_deg=60.0)
+        with self.assertRaisesRegex(ValueError, "between 0 and 360"):
+            RobustGainObjective(
+                space,
+                pattern_mode="directional",
+                target_beamwidth_deg=0.0,
+            )
+        with self.assertRaisesRegex(ValueError, "weights"):
+            RobustGainObjective(space, beamwidth_weight=-1.0)
 
     def test_robust_objective_confirms_new_best_feasible_candidate(self):
         space = DesignSpace(

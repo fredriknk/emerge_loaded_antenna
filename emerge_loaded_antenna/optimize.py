@@ -369,7 +369,8 @@ class RobustGainObjective:
 
     ``pattern_mode="horizon"`` maximizes the 10th-percentile azimuth gain at
     zero elevation. ``"directional"`` maximizes one requested theta/phi
-    direction, while ``"peak"`` retains the original unconstrained behavior.
+    direction and can target the HPBW of both orthogonal cuts through it,
+    while ``"peak"`` retains the original unconstrained behavior.
     """
 
     def __init__(
@@ -379,6 +380,8 @@ class RobustGainObjective:
         pattern_mode: Literal["horizon", "directional", "peak"] = "horizon",
         target_theta_deg: float = 90.0,
         target_phi_deg: float = 0.0,
+        target_beamwidth_deg: float | None = None,
+        beamwidth_weight: float = 1.0,
         maximum_s11_db: float = -10.0,
         mismatch_weight: float = 2.0,
         s11_margin_target_db: float | None = None,
@@ -401,12 +404,27 @@ class RobustGainObjective:
             raise ValueError("invalid pattern_mode")
         if not 0 <= target_theta_deg <= 180:
             raise ValueError("target_theta_deg must be between zero and 180")
+        if not np.isfinite(target_phi_deg):
+            raise ValueError("target_phi_deg must be finite")
+        if target_beamwidth_deg is not None:
+            if pattern_mode != "directional":
+                raise ValueError(
+                    "target_beamwidth_deg requires directional pattern mode"
+                )
+            if (
+                not np.isfinite(target_beamwidth_deg)
+                or not 0 < target_beamwidth_deg <= 360
+            ):
+                raise ValueError(
+                    "target_beamwidth_deg must be finite and between 0 and 360"
+                )
         if maximum_height <= 0:
             raise ValueError("maximum_height must be positive")
         weights = (
             mismatch_weight,
             s11_margin_weight,
             gain_weight,
+            beamwidth_weight,
             ripple_weight,
             null_weight,
             height_weight,
@@ -443,6 +461,8 @@ class RobustGainObjective:
         self.pattern_mode = pattern_mode
         self.target_theta_deg = target_theta_deg
         self.target_phi_deg = target_phi_deg
+        self.target_beamwidth_deg = target_beamwidth_deg
+        self.beamwidth_weight = beamwidth_weight
         self.maximum_s11_db = maximum_s11_db
         self.mismatch_weight = mismatch_weight
         self.s11_margin_target_db = s11_margin_target_db
@@ -526,6 +546,7 @@ class RobustGainObjective:
             worst_s11 = float(np.max(result.s11_db))
             mismatch = np.maximum(0.0, result.s11_db - self.maximum_s11_db)
             mismatch_penalty = self.mismatch_weight*float(np.mean(mismatch**2))
+            beamwidth_penalty = 0.0
             s11_margin_reward = 0.0
             s11_margin_db = 0.0
             if self.s11_margin_target_db is not None:
@@ -561,6 +582,26 @@ class RobustGainObjective:
                     self.target_phi_deg,
                 )
                 pattern_penalty = 0.0
+                if self.target_beamwidth_deg is not None:
+                    elevation_width, azimuth_width = (
+                        result.directional_beamwidths_deg(
+                            self.target_theta_deg,
+                            self.target_phi_deg,
+                        )
+                    )
+                    beamwidth_errors = np.asarray(
+                        (
+                            elevation_width - self.target_beamwidth_deg,
+                            azimuth_width - self.target_beamwidth_deg,
+                        ),
+                        dtype=float,
+                    )
+                    beamwidth_error = float(
+                        np.sqrt(np.mean(beamwidth_errors**2))
+                    )
+                    beamwidth_penalty = self.beamwidth_weight*float(
+                        np.mean((beamwidth_errors/10.0)**2)
+                    )
             else:
                 useful_gain = result.peak_gain_dbi
                 pattern_penalty = 0.0
@@ -573,6 +614,7 @@ class RobustGainObjective:
             score = (
                 mismatch_penalty
                 + pattern_penalty
+                + beamwidth_penalty
                 + height_penalty
                 - s11_margin_reward
                 - self.gain_weight*useful_gain
@@ -597,8 +639,16 @@ class RobustGainObjective:
                 "s11_margin_db": s11_margin_db,
                 "s11_margin_reward": s11_margin_reward,
                 "pattern_penalty": pattern_penalty,
+                "beamwidth_penalty": beamwidth_penalty,
                 "height_penalty": height_penalty,
             }
+            if self.target_beamwidth_deg is not None:
+                metrics.update(
+                    target_beamwidth_deg=self.target_beamwidth_deg,
+                    elevation_beamwidth_deg=elevation_width,
+                    azimuth_beamwidth_deg=azimuth_width,
+                    beamwidth_error_deg=beamwidth_error,
+                )
             if self.s11_margin_target_db is not None:
                 metrics["s11_margin_target_db"] = self.s11_margin_target_db
             metrics.update(

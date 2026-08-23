@@ -403,10 +403,27 @@ zero on +Z and 90 degrees on the horizon; phi is the azimuth, with zero on +X
 and 90 degrees on +Y. `--pattern peak` restores unrestricted maximum-gain
 optimization.
 
-Directional mode currently maximizes gain at the single requested theta/phi
-sample. It does not yet optimize half-power beamwidth. `--angular-step` controls
-the far-field sampling resolution (2 degrees by default, at most 10 degrees),
-not a beamwidth goal. Run `--help` for all objective weights and budget controls.
+Directional mode maximizes gain at the requested theta/phi sample. It can also
+target half-power beamwidth on both orthogonal great-circle cuts through that
+direction:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --pattern directional `
+    --target-theta 70 `
+    --target-phi 0 `
+    --target-beamwidth-deg 60 `
+    --beamwidth-weight 1
+```
+
+The beamwidth penalty uses the RMS error of the elevation and azimuth HPBW
+values. With weight 1, a 10-degree RMS error adds 1 to the objective; adjust
+`--beamwidth-weight` to change that tradeoff against gain and matching. The
+HPBW threshold is 3 dB below gain at the requested lobe direction, and the
+contiguous lobe containing that direction is measured. `--angular-step`
+controls the far-field sampling resolution (2 degrees by default, at most 10
+degrees), not the beamwidth goal. Run `--help` for all objective weights and
+budget controls.
 
 ### Final verification
 

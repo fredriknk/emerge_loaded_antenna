@@ -55,6 +55,11 @@ METRIC_FIELDS = (
     "s11_margin_reward",
     "s11_margin_target_db",
     "pattern_penalty",
+    "target_beamwidth_deg",
+    "elevation_beamwidth_deg",
+    "azimuth_beamwidth_deg",
+    "beamwidth_error_deg",
+    "beamwidth_penalty",
     "height_penalty",
     "confirmation_requested_runs",
     "confirmation_successful_runs",
@@ -1330,6 +1335,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-beamwidth-deg",
+        type=float,
+        help=(
+            "directional-mode HPBW goal in degrees for both orthogonal cuts "
+            "through the lobe target"
+        ),
+    )
+    parser.add_argument(
+        "--beamwidth-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "beamwidth penalty weight; a 10-degree RMS error contributes "
+            "this value to the objective (default: %(default)g)"
+        ),
+    )
+    parser.add_argument(
         "--maximum-height-mm",
         type=float,
         help=(
@@ -1421,6 +1443,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-theta must be finite and between 0 and 180")
     if not np.isfinite(args.target_phi):
         parser.error("--target-phi must be finite")
+    if args.target_beamwidth_deg is not None:
+        if args.pattern != "directional":
+            parser.error("--target-beamwidth-deg requires --pattern directional")
+        if (
+            not np.isfinite(args.target_beamwidth_deg)
+            or not 0 < args.target_beamwidth_deg <= 360
+        ):
+            parser.error(
+                "--target-beamwidth-deg must be finite and between 0 and 360"
+            )
     args.frequency_hz = args.frequency_mhz * 1e6
     frequency_scale = REFERENCE_DESIGN_FREQUENCY_HZ / args.frequency_hz
     if args.match_bandwidth_mhz is None:
@@ -1500,6 +1532,7 @@ def parse_args() -> argparse.Namespace:
     weights = (
         args.mismatch_weight,
         args.s11_margin_weight,
+        args.beamwidth_weight,
         args.null_weight,
         args.ripple_weight,
         args.height_weight,
@@ -1982,6 +2015,8 @@ def run_campaign(args: argparse.Namespace) -> None:
         getattr(args, "s11_margin_target_db", -12.0)
     )
     args.s11_margin_weight = float(getattr(args, "s11_margin_weight", 0.10))
+    args.target_beamwidth_deg = getattr(args, "target_beamwidth_deg", None)
+    args.beamwidth_weight = float(getattr(args, "beamwidth_weight", 1.0))
     args.confirmation_runs = int(getattr(args, "confirmation_runs", 3))
     args.confirmation_score_tolerance = float(
         getattr(args, "confirmation_score_tolerance", 1.0)
@@ -2035,10 +2070,15 @@ def run_campaign(args: argparse.Namespace) -> None:
         "optimizer_budget_unit": "candidate_evaluations",
         "confirmation_simulations_counted_separately": True,
         "objective": {
+            "pattern_mode": args.pattern,
+            "target_theta_deg": args.target_theta,
+            "target_phi_deg": args.target_phi,
             "maximum_s11_db": args.s11_limit_db,
             "mismatch_weight": args.mismatch_weight,
             "s11_margin_target_db": args.s11_margin_target_db,
             "s11_margin_weight": args.s11_margin_weight,
+            "target_beamwidth_deg": args.target_beamwidth_deg,
+            "beamwidth_weight": args.beamwidth_weight,
             "confirmation_runs": args.confirmation_runs,
             "confirmation_score_tolerance": (
                 args.confirmation_score_tolerance
@@ -2189,6 +2229,11 @@ def run_campaign(args: argparse.Namespace) -> None:
     high_mhz = args.frequency_mhz + args.match_bandwidth_mhz / 2
     print(f"ROBUST {args.frequency_mhz:g} MHz ANTENNA CAMPAIGN")
     print(f"Pattern target  : {args.pattern}")
+    if args.pattern == "directional":
+        print(
+            f"Lobe direction  : theta {args.target_theta:g} deg, "
+            f"phi {args.target_phi:g} deg"
+        )
     print(f"Match samples   : {low_mhz:g}, {args.frequency_mhz:g} and {high_mhz:g} MHz")
     print(
         f"Match objective : limit {args.s11_limit_db:g} dB; margin reward to "
@@ -2202,6 +2247,11 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Pattern limits  : horizon min {args.minimum_horizon_gain_dbi:.1f} dBi, "
         f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
     )
+    if args.target_beamwidth_deg is not None:
+        print(
+            f"Beamwidth goal  : {args.target_beamwidth_deg:g} deg HPBW on both "
+            f"orthogonal cuts, weight {args.beamwidth_weight:g}"
+        )
     height_wavelengths = (
         args.maximum_height_mm * 1e-3 / free_space_wavelength(frequency_hz)
     )
@@ -2332,6 +2382,8 @@ def run_campaign(args: argparse.Namespace) -> None:
                     pattern_mode=args.pattern,
                     target_theta_deg=args.target_theta,
                     target_phi_deg=args.target_phi,
+                    target_beamwidth_deg=args.target_beamwidth_deg,
+                    beamwidth_weight=args.beamwidth_weight,
                     maximum_s11_db=args.s11_limit_db,
                     mismatch_weight=args.mismatch_weight,
                     s11_margin_target_db=args.s11_margin_target_db,

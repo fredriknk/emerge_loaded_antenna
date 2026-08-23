@@ -149,6 +149,21 @@ class SimulationResult:
         amplitude = abs(np.asarray(self.farfield_3d.normE)[index]/em.lib.EISO)
         return float(20*np.log10(max(amplitude, 1e-12)))
 
+    def directional_beamwidths_deg(
+        self,
+        theta_deg: float,
+        phi_deg: float,
+    ) -> tuple[float, float]:
+        """Return orthogonal elevation/azimuth HPBW through a direction."""
+        if self.farfield_3d is None:
+            raise RuntimeError("far-field gain was not computed")
+        return _directional_beamwidths_deg(
+            self.farfield_3d,
+            theta_deg,
+            phi_deg,
+            self.options.farfield_angular_step_deg,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         values = {
             "frequencies_hz": self.frequencies.tolist(),
@@ -171,6 +186,149 @@ class SimulationResult:
         if self.farfield_metrics is not None:
             values["farfield_metrics"] = self.farfield_metrics.as_dict()
         return values
+
+
+def _half_power_beamwidth_deg(
+    offsets_deg: np.ndarray,
+    gain_db: np.ndarray,
+) -> float:
+    """Measure the periodic -3 dB region containing the zero-degree sample."""
+    offsets = np.asarray(offsets_deg, dtype=float)
+    gain = np.asarray(gain_db, dtype=float)
+    if offsets.ndim != 1 or gain.shape != offsets.shape or offsets.size < 4:
+        raise ValueError("beamwidth cuts must be matching one-dimensional arrays")
+    center = int(np.argmin(np.abs(offsets)))
+    if not np.isclose(offsets[center], 0.0):
+        raise ValueError("beamwidth cut must contain zero degrees")
+    if not np.isfinite(gain[center]):
+        raise RuntimeError("directional target gain was not finite")
+
+    threshold = gain[center] - 3.0
+    above = np.isfinite(gain) & (gain >= threshold)
+    if np.all(above):
+        return 360.0
+
+    count = offsets.size
+    right_inside = center
+    while above[(right_inside + 1) % count]:
+        right_inside = (right_inside + 1) % count
+    right_outside = (right_inside + 1) % count
+
+    left_inside = center
+    while above[(left_inside - 1) % count]:
+        left_inside = (left_inside - 1) % count
+    left_outside = (left_inside - 1) % count
+
+    center_angle = offsets[center]
+    right_inside_angle = (offsets[right_inside] - center_angle) % 360.0
+    right_outside_angle = (offsets[right_outside] - center_angle) % 360.0
+    left_inside_angle = -((center_angle - offsets[left_inside]) % 360.0)
+    left_outside_angle = -((center_angle - offsets[left_outside]) % 360.0)
+
+    def crossing(
+        inside_angle: float,
+        outside_angle: float,
+        inside_gain: float,
+        outside_gain: float,
+    ) -> float:
+        fraction = (threshold - inside_gain) / (outside_gain - inside_gain)
+        return inside_angle + float(np.clip(fraction, 0.0, 1.0)) * (
+            outside_angle - inside_angle
+        )
+
+    right_crossing = crossing(
+        right_inside_angle,
+        right_outside_angle,
+        gain[right_inside],
+        gain[right_outside],
+    )
+    left_crossing = crossing(
+        left_inside_angle,
+        left_outside_angle,
+        gain[left_inside],
+        gain[left_outside],
+    )
+    return float(np.clip(right_crossing - left_crossing, 0.0, 360.0))
+
+
+def _directional_beamwidths_deg(
+    farfield: Any,
+    theta_deg: float,
+    phi_deg: float,
+    angular_step_deg: float,
+) -> tuple[float, float]:
+    """Measure orthogonal great-circle HPBW cuts through a target direction."""
+    if not np.isfinite(theta_deg) or not 0 <= theta_deg <= 180:
+        raise ValueError("theta_deg must be finite and between zero and 180")
+    if not np.isfinite(phi_deg):
+        raise ValueError("phi_deg must be finite")
+    if not np.isfinite(angular_step_deg) or angular_step_deg <= 0:
+        raise ValueError("angular_step_deg must be finite and positive")
+
+    gain_amplitude = np.abs(np.asarray(farfield.normE)/em.lib.EISO)
+    gain_db = 20*np.log10(np.maximum(gain_amplitude, 1e-12))
+    theta_grid = np.asarray(farfield.theta, dtype=float)
+    phi_grid = np.asarray(farfield.phi, dtype=float)
+    if (
+        theta_grid.ndim != 2
+        or theta_grid.shape != gain_db.shape
+        or phi_grid.shape != gain_db.shape
+    ):
+        raise RuntimeError("far-field angular grid has an unsupported shape")
+    theta_axis = theta_grid[0, :]
+    phi_axis = phi_grid[:, 0]
+
+    sample_count = max(4, int(np.ceil(360.0/angular_step_deg)))
+    if sample_count % 2:
+        sample_count += 1
+    offsets_deg = np.linspace(-180.0, 180.0, sample_count, endpoint=False)
+    offsets = np.deg2rad(offsets_deg)
+    theta_target = np.deg2rad(theta_deg)
+    phi_target = np.deg2rad(phi_deg)
+    direction = np.asarray(
+        (
+            np.sin(theta_target)*np.cos(phi_target),
+            np.sin(theta_target)*np.sin(phi_target),
+            np.cos(theta_target),
+        )
+    )
+    elevation_tangent = np.asarray(
+        (
+            np.cos(theta_target)*np.cos(phi_target),
+            np.cos(theta_target)*np.sin(phi_target),
+            -np.sin(theta_target),
+        )
+    )
+    azimuth_tangent = np.asarray(
+        (-np.sin(phi_target), np.cos(phi_target), 0.0)
+    )
+
+    def cut_gain(tangent: np.ndarray) -> np.ndarray:
+        points = (
+            np.cos(offsets)[:, None]*direction
+            + np.sin(offsets)[:, None]*tangent
+        )
+        sample_theta = np.arccos(np.clip(points[:, 2], -1.0, 1.0))
+        sample_phi = np.arctan2(points[:, 1], points[:, 0])
+        theta_indices = np.argmin(
+            np.abs(theta_axis[None, :] - sample_theta[:, None]),
+            axis=1,
+        )
+        phi_delta = np.angle(
+            np.exp(1j*(phi_axis[None, :] - sample_phi[:, None]))
+        )
+        phi_indices = np.argmin(np.abs(phi_delta), axis=1)
+        return np.asarray(gain_db[phi_indices, theta_indices], dtype=float)
+
+    elevation_width = _half_power_beamwidth_deg(
+        offsets_deg,
+        cut_gain(elevation_tangent),
+    )
+    azimuth_width = _half_power_beamwidth_deg(
+        offsets_deg,
+        cut_gain(azimuth_tangent),
+    )
+    return elevation_width, azimuth_width
 
 
 def _farfield_metrics(
