@@ -1,55 +1,81 @@
-# Smooth Variable-Coil Loaded Antenna in EMerge
+# EMerge Loaded Antenna Designer and Optimizer
 
-This package generates and simulates a **smooth, continuously curved loaded
-antenna with any number of coils, including zero**, directly in
-[EMerge](https://github.com/FennisRobert/EMerge). It provides a reusable Python
-API for scripts and optimizers, plus `main.py` as an interactive plotting
-example. The default design has two coils.
+Design, simulate, optimize, and verify smooth loaded monopole antennas with
+[EMerge](https://github.com/FennisRobert/EMerge). The project supports an
+unloaded radiator or any number of helical loading coils, constructs the model
+as one continuously curved conductor, and provides a campaign optimizer for
+gain, impedance match, pattern shape, lobe direction, and beamwidth.
 
-The default antenna geometry consists of:
+The main workflow is:
 
-```text
-        Top straight
-             │
-        ╭─────────╮
-       ╱           ╲
-      │   Coil 2    │
-       ╲           ╱
-        ╰─────────╯
-             │
-       Middle straight
-             │
-        ╭─────────╮
-       ╱           ╲
-      │   Coil 1    │
-       ╲           ╱
-        ╰─────────╯
-             │
-       Bottom straight
-             │
-            Feed
-```
+1. Describe a physical antenna with immutable Python configuration objects.
+2. Simulate its S11 and far field in an open-region finite-element model.
+3. Search several coil topologies and random seeds with differential evolution.
+4. Fine-tune the most promising design with independent coil dimensions.
+5. Verify the winner with a finer mesh, denser sweep, and convergence study.
 
-The important feature is that the straight sections and coils are **not joined
-by sharp corners**. Exact lines and local cubic Bezier pieces are assembled
-into one continuous OpenCASCADE wire, then swept once with a circular wire
-cross-section. Each piece is independent, so a coil cannot bend a distant
-straight section as it could with one global BSpline.
+All library dimensions are in **metres** and all frequencies are in **hertz**.
+Command-line options use MHz, millimetres, and degrees where stated.
 
-## Requirements
+## Table of contents
 
-The package is intended for:
+- [What the project provides](#what-the-project-provides)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Recommended design workflow](#recommended-design-workflow)
+- [Antenna designer](#antenna-designer)
+  - [Geometry model](#geometry-model)
+  - [Design objects](#design-objects)
+  - [Create and edit designs](#create-and-edit-designs)
+  - [Save, load, and scale designs](#save-load-and-scale-designs)
+- [Simulation](#simulation)
+  - [Run a simulation](#run-a-simulation)
+  - [Simulation configuration](#simulation-configuration)
+  - [Coordinates and far-field results](#coordinates-and-far-field-results)
+  - [Interactive model example](#interactive-model-example)
+- [Campaign optimizer](#campaign-optimizer)
+  - [First optimization campaign](#first-optimization-campaign)
+  - [Starting design and wire diameter](#starting-design-and-wire-diameter)
+  - [Topology selection](#topology-selection)
+  - [Broad search and fine tuning](#broad-search-and-fine-tuning)
+  - [Pattern, lobe, and beamwidth goals](#pattern-lobe-and-beamwidth-goals)
+  - [Matching and physical constraints](#matching-and-physical-constraints)
+  - [Budgets, seeds, restarts, and confirmation](#budgets-seeds-restarts-and-confirmation)
+  - [Automatic numerical preflight](#automatic-numerical-preflight)
+  - [Campaign output files](#campaign-output-files)
+  - [Optimizer option reference](#optimizer-option-reference)
+- [Custom optimization API](#custom-optimization-api)
+- [Verify a winning design](#verify-a-winning-design)
+- [Open-region convergence](#open-region-convergence)
+- [Solvers and performance](#solvers-and-performance)
+- [Interpreting results](#interpreting-results)
+- [Troubleshooting](#troubleshooting)
+- [Development and project layout](#development-and-project-layout)
+- [Modeling scope](#modeling-scope)
 
-* Python 3.12–3.13
-* EMerge 2.8.4
-* NumPy
+## What the project provides
 
-## Environment setup
+- Zero, one, or many integer-turn helical loading coils.
+- Exact straight segments, local cubic Bezier transitions, and segmented helix
+  arcs assembled into one continuous centerline and swept once.
+- Configurable wire diameter, radials, coil dimensions, handedness, port, mesh,
+  frequency sweep, and open-region boundary.
+- S11, global peak gain, requested-direction gain, horizon statistics, ripple,
+  null depth, peak direction, and directional half-power beamwidth.
+- Wavelength-scaled reference designs for frequencies other than 868 MHz.
+- Multi-topology, multi-seed optimization campaigns with broad and fine modes.
+- Broadband matching penalties, height limits, horizon or directional pattern
+  goals, optional beamwidth targeting, and repeat confirmation of incumbents.
+- Atomic progress artifacts, CSV evaluation logs, topology rankings, and JSON
+  designs that can be loaded directly back into the library.
+- Separate final-verification and numerical-convergence tools.
 
-Run these commands from the repository root. The `.venv` folder is local to
-this project and is ignored by git.
+## Installation
 
-Download python 3.12 or 3.13 from [python.com/downloads](https://www.python.org/downloads/)
+The package requires Python 3.10 or newer, EMerge 2.8.4 or newer in the 2.x
+series, and NumPy 2.x. SciPy is needed for optimization and Matplotlib for the
+verification plots. EMerge and its native solver dependencies may impose
+additional platform or Python-version constraints.
 
 Windows PowerShell:
 
@@ -59,1113 +85,899 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify]"
 ```
 
-If PowerShell blocks activation scripts, you can still use the full
-`.\.venv\Scripts\python.exe` commands above. To activate the environment for
-the current terminal session:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-On macOS or Linux:
+macOS or Linux:
 
 ```bash
-python3.13 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[optimize,verify]"
 ```
 
-## Library API
+Install the test extra when developing:
 
-All public dimensions are metres and all frequencies are hertz. A headless
-single-frequency evaluation suitable for an optimizer is:
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[optimize,verify,test]"
+```
+
+Use `python` in the commands below if the virtual environment is activated.
+Otherwise, on Windows, substitute `.\.venv\Scripts\python.exe` as shown.
+
+## Quick start
+
+Run a short campaign at 868 MHz, then verify its winner:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --frequency-mhz 868 `
+    --coil-counts 0,1,2 `
+    --maxiter 3 `
+    --seeds 2 `
+    --output optimization_results\quick_start
+
+.\.venv\Scripts\python.exe -u .\examples\verify_best.py `
+    optimization_results\quick_start\campaign_best.json
+```
+
+`--maxiter 3` is a pipeline check, not a serious engineering search. A useful
+campaign normally needs a measured time budget, several seeds, and final
+verification:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --frequency-mhz 868 `
+    --coil-counts 0,1,2,3 `
+    --hours 12 `
+    --seeds 4 `
+    --wire-diameter-mm 1.6 `
+    --output optimization_results\868mhz_broad
+```
+
+The output directory must not already contain campaign files. This prevents an
+old and a new campaign from being mistaken for one run.
+
+## Recommended design workflow
+
+1. **Choose the electrical goal.** Decide the operating frequency, required
+   S11 band, useful direction or horizon coverage, acceptable height, wire
+   diameter, and whether beamwidth is a real requirement.
+2. **Inspect a starting model.** Use `main.py` or a small library script to view
+   the geometry and confirm units, coil order, radial angle, and port position.
+3. **Run a broad campaign.** Compare likely coil counts or explicit turn cases.
+   Broad mode shares coil pitch and radius to keep the search dimension small.
+4. **Fine-tune the winner.** Warm-start from `campaign_best.json` and use
+   `--finetune`. Fine mode releases each coil's pitch and radius and adds local
+   refinement around good candidates.
+5. **Verify independently.** Run `verify_best.py` for a denser frequency sweep,
+   finer mesh, and finer angular sampling.
+6. **Test numerical convergence on the actual winner.** Run
+   `check_open_region.py campaign_best.json`. The optimizer's automatic
+   preflight uses a numerical reference design, not the eventual winner.
+7. **Prototype and measure.** Numerical convergence does not account for
+   connectors, lossy materials, support structures, construction tolerance, or
+   the real installation environment.
+
+## Antenna designer
+
+### Geometry model
+
+The radiator begins above a lumped feed and alternates straight sections and
+coils along +Z:
+
+```text
+          straight N
+              |
+         smooth exit
+          / coil N \
+         smooth entry
+              |
+             ...
+              |
+         straight 1
+              |
+         smooth exit
+          / coil 1 \
+         smooth entry
+              |
+         straight 0
+              |
+             feed
+       \  \   |   /  /
+          radials
+```
+
+For `N` coils, `straight_lengths` must contain exactly `N + 1` values. Index 0
+is the bottom section nearest the feed. Coil index 0 is the lowest coil.
+
+The builder uses exact line segments, local transition curves, and helix arcs
+of at most 120 degrees. These pieces form one continuous OpenCASCADE wire,
+which is swept once with a circular conductor cross-section. Local transitions
+avoid the distant-shape distortion that a single global spline can introduce.
+
+Each coil has an integer number of turns and returns to the radiator axis.
+`radius` is measured to the wire centerline, so the approximate physical coil
+outside diameter is:
+
+```text
+2 * (coil.radius + design.wire_radius)
+```
+
+`radial_angle_deg` is the downward angle of the **ground-plane radials**. It is
+not the far-field lobe direction. Lobe direction is selected in the optimizer
+with `--target-theta` and `--target-phi`.
+
+### Design objects
+
+`AntennaDesign` describes the complete physical structure:
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `wire_radius` | `1e-3` m | Conductor radius; diameter is twice this value. |
+| `radial_length` | `72e-3` m | Length of each ground-plane radial. |
+| `radial_angle_deg` | `45` | Radial angle below horizontal; strictly between 0 and 90. |
+| `radial_count` | `4` | Equally spaced radials; at least two. |
+| `straight_lengths` | `(0.140, 0.221, 0.140)` m | Bottom-to-top radiator straight sections. |
+| `coils` | two default coils | Bottom-to-top sequence of `CoilDesign` objects. |
+| `port_height` | `2e-3` m | Height of the lumped feed region. |
+| `port_impedance` | `50` ohm | Reference impedance. |
+
+`CoilDesign` describes one loading coil:
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `radius` | `10e-3` m | Helix centerline radius. |
+| `turns` | `1` | Positive integer turns. |
+| `pitch` | `7e-3` m | Axial advance per turn. |
+| `transition` | `6e-3` m | Axial room assigned to each smooth transition. |
+| `transition_offset` | `4.75e-3` m | Transition chord offset; between zero and coil diameter. |
+| `handedness` | `"RH"` | `"RH"` or `"LH"`. |
+
+Configuration dataclasses are frozen. This makes designs safe to reuse across
+simulations and optimizer evaluations.
+
+### Create and edit designs
 
 ```python
 from dataclasses import replace
 
-from emerge_loaded_antenna import (
-    AntennaDesign,
-    FrequencySweep,
-    SimulationOptions,
-    simulate,
-)
+from emerge_loaded_antenna import AntennaDesign, CoilDesign
 
-design = replace(
-    AntennaDesign(),
-    straight_lengths=(140e-3, 225e-3, 140e-3),
+design = AntennaDesign(
+    wire_radius=0.8e-3,       # 1.6 mm diameter
+    radial_length=82e-3,
+    radial_angle_deg=35.0,   # ground-plane radial angle
+    radial_count=4,
+    straight_lengths=(118e-3, 185e-3, 132e-3),
+    coils=(
+        CoilDesign(radius=12e-3, turns=1, pitch=8e-3),
+        CoilDesign(radius=10e-3, turns=2, pitch=7e-3, handedness="LH"),
+    ),
 )
-options = SimulationOptions(
-    sweep=FrequencySweep.single(868e6),
-    show_geometry=False,
-    show_mesh=False,
-    compute_farfield=False,
-    verbose=False,
-)
-result = simulate(design, options)
-print(result.s11_db_at(868e6))
-print(result.as_dict())
+design.validate()
+
+# Frozen dataclasses are edited by creating a replacement.
+thicker = replace(design, wire_radius=1.0e-3)
 ```
 
-`simulate()` returns structured frequencies, complex S11, S11 in dB, mesh
-counts, optional peak gain, and the underlying EMerge artifacts when deeper
-inspection is needed. `build_model()` performs geometry and meshing without a
-solve.
+An unloaded radiator has no coils and one straight section:
 
-### Optimizer Adapter
+```python
+unloaded = AntennaDesign(
+    straight_lengths=(0.25,),
+    coils=(),
+)
+unloaded.validate()
+```
+
+### Save, load, and scale designs
 
 ```python
 from emerge_loaded_antenna import (
-    AntennaDesign,
-    DesignSpace,
-    DesignVariable,
-    S11Objective,
+    load_design,
+    load_reference_design,
+    save_design,
+    scale_design,
 )
 
-space = DesignSpace(
-    AntennaDesign(),
-    (
-        DesignVariable("straight_lengths.0", 100e-3, 180e-3),
-        DesignVariable("straight_lengths.1", 160e-3, 260e-3),
-        DesignVariable("coils.0.pitch", 5e-3, 10e-3),
-        DesignVariable("coils.1.pitch", 5e-3, 10e-3),
-    ),
-)
-objective = S11Objective(space, target_frequency=868e6)
+reference_868 = load_reference_design()
+reference_915 = load_reference_design(915e6)
+save_design(reference_915, "designs/reference_915.json")
+restored = load_design("designs/reference_915.json")
 
-# Pass objective and space.bounds to scipy.optimize or another minimizer.
-score = objective(space.initial_vector)
+# Scale an arbitrary design from 915 MHz to 433 MHz.
+scaled = scale_design(restored, factor=915e6 / 433e6)
 ```
 
-`GainMatchObjective` optimizes unrestricted peak-anywhere gain.
-`RobustGainObjective` can instead maximize 10th-percentile horizon gain or gain
-in a requested direction while penalizing worst-band mismatch, azimuth ripple,
-deep nulls and excessive height. All objectives retain evaluation history and
-convert geometry/solver failures into a finite penalty.
+`load_design` accepts either a standalone design JSON file or an optimizer
+result containing a top-level `design` object. Wavelength scaling changes
+physical lengths, including wire radius, while retaining angles, counts,
+handedness, and impedance.
 
-### Robust optimization campaign
+## Simulation
 
-The default remains 868 MHz, so the existing twelve-hour command still works:
+### Run a simulation
+
+```python
+from emerge_loaded_antenna import (
+    FrequencySweep,
+    SimulationOptions,
+    load_reference_design,
+    simulate,
+)
+
+frequency = 868e6
+design = load_reference_design(frequency)
+options = SimulationOptions(
+    sweep=FrequencySweep(center=frequency, span=20e6, points=5),
+    compute_farfield=True,
+    farfield_frequency=frequency,
+    farfield_angular_step_deg=2.0,
+    solver="auto",
+)
+
+result = simulate(design, options)
+print(result.frequencies)
+print(result.s11_db)
+print(result.peak_gain_dbi)
+print(result.farfield_metrics)
+print(result.gain_db_at(theta_deg=90, phi_deg=0))
+```
+
+`simulate()` validates the design and options, builds the model, meshes it,
+solves when requested, and returns a `SimulationResult`. Set `solve=False` to
+build or preview geometry without solving. Far-field calculation requires a
+solve.
+
+### Simulation configuration
+
+`FrequencySweep` uses a center frequency, total span, and number of points.
+`FrequencySweep.single(frequency)` creates a one-point sweep.
+
+Important `MeshSettings` controls:
+
+| Field | Default | Effect |
+|---|---:|---|
+| `wire_sections` | `6` | Circumferential conductor resolution; minimum six. |
+| `antenna_size_factor` | `3.0` | Antenna surface mesh size relative to wire radius. |
+| `radial_size_factor` | `10.0` | Radial surface mesh factor. |
+| `feed_size_factor` | `3.0` | Feed-region mesh factor. |
+| `curved_boundary_segments` | `12` | Segmentation of curved boundaries. |
+| `wavelength_resolution` | `0.33` | Free-space volumetric mesh resolution in wavelengths. |
+| `air_margin_wavelengths` | `0.25` | Air between structure and Huygens box. |
+| `preview_points_per_turn` | `20` | Sampling used by geometry previews. |
+
+`OpenRegionSettings` defaults to an ordinary-air buffer of one wavelength and
+a second-order type-B absorbing boundary on **all six outer faces**, including
+the bottom. `mode="pml"` selects a perfectly matched layer instead. The default
+ABC setup is the path exercised by the campaign convergence workflow.
+
+`SimulationOptions` also controls the solver, far-field sampling, verbosity,
+model name, and optional geometry, mesh, and coil-preview viewers.
+
+### Coordinates and far-field results
+
+The far-field convention is spherical:
+
+- `theta = 0 degrees` points along +Z.
+- `theta = 90 degrees` is the horizontal plane.
+- `theta = 180 degrees` points along -Z.
+- `phi = 0 degrees` points along +X.
+- `phi = 90 degrees` points along +Y.
+
+`SimulationResult` exposes complex S11, S11 in dB, peak gain, mesh counts, raw
+solver data, and `FarFieldMetrics`. The latter includes peak direction and
+horizon minimum, P10, mean, P90, peak, P90-P10 ripple, and peak-to-null range.
+
+For a requested directional lobe, use:
+
+```python
+gain = result.gain_db_at(theta_deg=70, phi_deg=20)
+elevation_hpbw, azimuth_hpbw = result.directional_beamwidths_deg(70, 20)
+```
+
+Beamwidth is the contiguous half-power lobe containing the requested direction,
+measured on two orthogonal great-circle cuts. The threshold is 3 dB below gain
+at that requested direction, not necessarily 3 dB below the global peak.
+
+### Interactive model example
+
+`main.py` is an editable example for geometry, mesh, and far-field inspection:
 
 ```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12
+.\.venv\Scripts\python.exe .\main.py --solver auto
 ```
 
-The target is not hard-coded. For example, a fresh 915 MHz search over a
-20 MHz matching band is:
+The physical design and viewer switches are intentionally defined in the file
+so it can serve as a compact experiment script. Closing an EMerge/Gmsh viewer
+continues execution.
+
+## Campaign optimizer
+
+### First optimization campaign
+
+The campaign entry point is `examples/optimize_gain.py`. It evaluates every
+requested topology and seed, writes progress continuously, confirms apparent
+incumbents, and ranks the final feasible designs.
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --frequency-mhz 915 `
-    --match-bandwidth-mhz 20 `
-    --hours 12
+    --frequency-mhz 868 `
+    --match-bandwidth-mhz 10 `
+    --coil-counts 0,1,2,3 `
+    --pattern horizon `
+    --hours 12 `
+    --seeds 4 `
+    --output optimization_results\868mhz_horizon
 ```
 
-With no `--warm-start`, the script synthesizes an electrically equivalent
-starting geometry by scaling every length with wavelength. The dimensional
-search bounds scale with wavelength and wire diameter. This is only an initial
-point for differential evolution, not a required pre-optimized antenna.
-Supply any current-schema design or campaign result with
-`--warm-start`; its physical dimensions, coil count and turn counts are used
-as written unless explicitly overridden by the geometry or topology flags.
+Use unbuffered mode (`-u`) so long-running progress appears immediately.
 
-Set a fixed physical wire diameter directly from the optimizer command line:
+### Starting design and wire diameter
+
+Without `--warm-start`, the campaign loads the tracked 868 MHz reference and
+scales all physical dimensions by wavelength to the requested frequency. A
+warm start may be a raw design JSON or any optimizer JSON containing `design`:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --warm-start optimization_results\868mhz_horizon\campaign_best.json `
+    --finetune `
+    --hours 6 `
+    --output optimization_results\868mhz_fine
+```
+
+Set the fixed conductor diameter explicitly with `--wire-diameter-mm` (or its
+alias `--wire-diameter`):
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
     --wire-diameter-mm 1.6 `
-    --hours 12
+    --hours 8
 ```
 
-`--wire-diameter-mm` replaces the diameter inherited from the wavelength-scaled
-reference or warm start and is used by the wire-aware search bounds. It takes
-precedence over `--warm-start`; topology can still be selected with
-`--coil-count`, `--coil-counts`, or `--turn-cases`.
+The diameter flag overrides both the wavelength-scaled reference and a warm
+start. The campaign converts it to `AntennaDesign.wire_radius`, keeps it fixed
+during optimization, and uses it to derive collision-safe lower bounds for
+straight lengths, radial length, coil pitch, and coil radius.
 
-When a topology override changes the coil count, the generated seed uses
-electrical-length priors: a zero-coil radiator starts at `0.25 lambda`; a
-loaded topology starts with `0.25 lambda` below the first coil and `0.50
-lambda` for every later straight section. These are starting guesses based on
-the conventional [quarter-wave monopole](https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2024RS008068)
-and [half-wave collinear sections](https://ntrs.nasa.gov/citations/19840019086),
-not assumed resonant lengths. Coil loading, conductor thickness, the ground
-system and end effects are left for the solver and optimizer.
+There is no optimizer flag that fixes `AntennaDesign.radial_angle_deg`; that
+angle remains a design variable. It describes ground radials, not the desired
+radiation direction.
 
-The broad-search intervals deliberately include quarter-wave, half-wave and
-5/8-wave candidates without admitting arbitrary multi-wavelength sections.
-Here `d` is wire diameter:
+### Topology selection
 
-| Parameter | Nominal interval | Wire/geometry safeguard |
-|---|---:|---:|
-| zero-coil radiator | `0.18-0.70 lambda` | lower bound at least `12d` |
-| each loaded straight section | `0.15-0.72 lambda` | lower bound at least `12d` |
-| radial length | `0.15-0.40 lambda` | lower bound at least `12d` |
-| coil pitch | `0.010-0.040 lambda` | lower at least `1.5d`, upper at least `6d` |
-| coil radius | `0.015-0.050 lambda` | lower at least `2.5d` plus transition clearance, upper at least `8d` |
-| radial angle | `5-75 degrees` | expands for an outside warm start |
+Topology means the number of coils and the integer turns in each coil. Turn
+counts are discrete campaign cases; differential evolution optimizes only the
+continuous dimensions inside each case.
 
-If a supplied design lies outside a heuristic interval, that individual bound
-expands around it instead of clipping it; only the coil transition's geometric
-validity remains a hard floor. Every saved result records the exact interval
-and starting value under `search_space`.
+| Option | Example | Meaning |
+|---|---|---|
+| no topology flag | | Keep the reference or warm-start turn pattern. |
+| `--coil-count N` | `--coil-count 2` | Run one N-coil case, normally one turn per coil. |
+| `--coil-counts LIST` | `--coil-counts 0,1,2,3` | Compare several one-turn-per-coil cases. |
+| `--turn-cases LIST` | `--turn-cases none,1,1x2,1x1x1` | Compare explicit turn tuples. `none` is zero-coil. |
 
-The automatic soft height allowance is also topology-aware:
-
-```text
-maximum height = (0.70 + 0.50 * largest requested coil count) * lambda
-```
-
-For example, a three-coil 868 MHz campaign gets approximately `760 mm` or
-`2.20 lambda`, while the zero-coil search remains bounded to `0.70 lambda`.
-This is a penalty threshold, not a hard geometry bound, and
-`--maximum-height-mm` overrides it.
-
-Before the optimization timer starts, the script checks a frequency-specific
-certificate such as
-`optimization_results/open_region_convergence_915000000hz.json`. If missing or
-mismatched, it runs seven isolated solves that vary Huygens clearance, ABC
-distance, and air-mesh resolution. This preflight uses a wavelength-scaled
-numerical reference problem, independently of the user's starting antenna, so
-poor initial S11 or gain cannot block a new search. A passing certificate is
-reused for later runs with matching frequency, numerical settings, and
-far-field angular grid.
-
-If the automatic comparison fails, the default is to print a prominent
-warning, record `convergence_status: "warning"` in every result, and continue
-the optimization. Use strict mode when an uncertified campaign must not start:
+`--coil-counts` and `--turn-cases` cannot be combined. `--coil-count` may be
+combined with `--turn-cases` only when every explicit case has that count.
+Examples:
 
 ```powershell
+# Unloaded, one 1-turn coil, two coils with 1 and 2 turns, and three 1-turn coils
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --frequency-mhz 915 `
-    --hours 12 `
-    --require-convergence
-```
+    --turn-cases none,1,1x2,1x1x1 `
+    --hours 10
 
-The convergence campaign can also be run explicitly:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
-    --frequency-mhz 915
-```
-
-`--no-auto-convergence` prevents generation and reuses a matching report when
-available; otherwise it warns and continues, or aborts when combined with
-`--require-convergence`. `--skip-convergence-check` bypasses even certificate
-validation and cannot be combined with strict mode.
-
-After preflight, a broad campaign runs four independent differential-evolution
-populations and divides the requested candidate budget between them. A
-fine-tune campaign defaults to two seeds so each local population receives
-more generations. `--seeds` overrides either default. To continue from one of
-your own saved winners, pass it explicitly:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --hours 12 `
-    --warm-start `
-    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json
-```
-
-The wall-time conversion assumes roughly eight seconds per candidate;
-override it with `--seconds-per-eval` if the live ETA on your machine settles
-substantially higher or lower. Apparent new incumbents are confirmed with
-three simulations by default, so `--hours` remains an estimate. Progress and
-result files report optimizer candidates and physical simulations separately.
-
-The broad search optimizes every straight length, one pitch and radius shared
-by all coils, radial length, and radial angle. Thus a design with N >= 1 coils
-has only N+5 continuous variables; the zero-coil case has three. After the first
-coil, each added coil introduces only one additional straight length. S11 is
-constrained at the lower edge, center and upper edge of the requested matching
-band. Every run receives the synthesized or supplied design as `x0`; each
-candidate is flushed to CSV and every new global best is atomically
-checkpointed as `campaign_best.json`. Output goes into a new frequency-labelled
-timestamped directory so previous campaigns are never overwritten.
-
-Choose the coil count explicitly. A zero-coil campaign optimizes a conventional
-straight radiator:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py --coil-count 0
-```
-
-To compare coil counts automatically in one campaign, pass a comma-separated
-list. Each count starts with one turn per coil, so this searches `none`, `1`,
-`1x1`, and `1x1x1` with the same objective and one shared leaderboard:
-
-```powershell
+# Only a two-coil topology
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --hours 12 `
-    --coil-counts 0,1,2,3
-```
-
-The time estimate is divided across every topology and seed. Lower-dimensional
-topologies receive more generations so that each run gets approximately the
-same number of expensive antenna evaluations. The CSV contains the union of
-all topology parameters; inapplicable coil columns are left blank. The global
-`campaign_best.json` records both `coil_count` and `turn_case`. Each topology
-also gets an interruption-safe `turns_*_best.json` checkpoint, and
-`topology_leaderboard.json` ranks their best results under the shared
-objective.
-
-Once the broad campaign has selected a topology and a good geometry, rerun its
-winner with `--finetune`. This releases every coil pitch and radius as an
-independent variable; with N coils the search then has 3N+3 variables:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --hours 12 `
-    --warm-start `
-    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json `
-    --finetune
-```
-
-No topology flag is needed for that second stage: the coil and turn counts are
-inferred from the saved winner. `--finetune` can also be applied directly to a
-multi-topology campaign, but the larger populations make that substantially
-more expensive.
-
-Fine-tuning is deliberately local rather than a second global search. Each
-initial and restarted population contains 50% candidates within 3% of the
-confirmed incumbent in normalized bound space, 30% within 10%, and 20% global
-samples. The incumbent itself is retained exactly. Fine-tune differential
-evolution uses mutation dithering from 0.20 to 0.60 and recombination 0.30.
-After ten generations without a confirmed 0.05-point improvement, the
-remaining candidate budget is restarted around the best feasible design. For
-short runs, that patience is reduced to at most half the available DE
-generations so the restart can actually occur. Terminal output reports true
-generations, stagnation and normalized population diversity.
-
-One whole population batch is reserved for a bounded normalized coordinate
-search around as many as three confirmed feasible elites. If none exists, the
-same budget explores around the best confirmed result instead of being
-discarded. This local stage replaces SciPy's generic polishing in `--finetune`;
-`--polish` still controls broad searches. The total optimizer-candidate budget
-remains unchanged across DE restarts and local search.
-
-Every would-be incumbent is synchronously repeated before its score is
-returned to differential evolution. A lone far-field spike is excluded by the
-three-run consensus, while an inconsistent candidate is quarantined rather
-than becoming the mutation anchor. The objective also gives a small default
-reward for worst-band S11 margin between -10 and -12 dB instead of treating
-every passing match as identical. Checkpoints and topology rankings prefer a
-confirmed design satisfying all hard constraints before comparing scalar
-scores. The main controls are:
-
-```text
---confirmation-runs 3
---confirmation-score-tolerance 1.0
---s11-margin-target-db -12
---s11-margin-weight 0.10
---restart-stagnation-generations 10
---restart-min-improvement 0.05
---local-search-evaluations 24
-```
-
-Fine-tune radii, mutation, recombination and local-search step sizes are also
-available as command-line options. Set
-`--restart-stagnation-generations 0` to disable only stagnation-triggered
-restarts; early SciPy convergence can still restart the population to spend the
-remaining budget. A campaign output directory is single-use, and the script
-refuses to start in a nonempty directory because resume semantics are not
-implemented.
-
-Coil turns are discontinuous geometry choices and are therefore separate
-searches rather than rounded continuous variables. Mixed coil counts and turn
-counts can be selected directly in one list:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --hours 12 `
-    --turn-cases none,1,1x1,1x2,2x1,1x1x1
-```
-
-To constrain all cases to two coils, the existing spelling remains available:
-
-```powershell
-.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
-    --hours 12 `
     --coil-count 2 `
-    --turn-cases 1x1,1x2,2x1,2x2,3x3
+    --hours 6
 ```
 
-When `--coil-count` is present, every turn case must contain that number of
-entries. For example, three coils use
-`--coil-count 3 --turn-cases 1x1x1,1x2x1`. `none` is the zero-coil case.
-`--coil-counts` generates its own one-turn cases and therefore cannot be
-combined with `--turn-cases`; use the mixed list form when explicit turns are
-needed.
+When topology differs from the starting design, a wavelength-based seed is
+generated for that case. Existing valid dimensions are retained where the
+topology permits it.
 
-For best optimizer convergence, first use the shared-geometry broad campaign,
-then fine-tune its winner. `--pattern directional --target-theta ...
---target-phi ...` selects the lobe direction to optimize. Spherical theta is
-zero on +Z and 90 degrees on the horizon; phi is the azimuth, with zero on +X
-and 90 degrees on +Y. `--pattern peak` restores unrestricted maximum-gain
-optimization.
+### Broad search and fine tuning
 
-Directional mode maximizes gain at the requested theta/phi sample. It can also
-target half-power beamwidth on both orthogonal great-circle cuts through that
-direction:
+Broad mode shares coil pitch and coil radius across all coils. It searches:
+
+- every straight-section length independently;
+- radial length and ground-radial angle;
+- shared coil pitch and shared coil radius for loaded topologies.
+
+This gives `N + 5` variables for `N` coils and three variables for an unloaded
+radiator. Sharing coil geometry reduces the search dimension and is usually
+the best first pass.
+
+`--finetune` (alias `--fine-tune`) releases every coil pitch and radius. It
+therefore searches `3N + 3` variables and is designed to warm-start from a good
+broad-search winner. Fine mode also uses a mixed initial population:
+
+- 50% near the warm start, within 3% of normalized range by default;
+- 30% within a wider 10% neighborhood;
+- 20% across the global bounds.
+
+It adds deterministic restarts after stagnation and a bounded pattern search
+around elite candidates. Fine mode's mutation, recombination, neighborhood
+radii, restart threshold, and local-search budget are configurable.
+
+The normal broad bounds are wavelength-based and then enlarged when needed to
+contain a valid warm start:
+
+| Quantity | Broad range |
+|---|---:|
+| Loaded straight length | 0.15 to 0.72 wavelength |
+| Unloaded straight length | 0.18 to 0.70 wavelength |
+| Radial length | 0.15 to 0.40 wavelength |
+| Ground-radial angle | 5 to 75 degrees |
+| Coil pitch | 0.010 to 0.040 wavelength |
+| Coil radius | 0.015 to 0.050 wavelength |
+
+Wire-aware floors prevent obviously impossible geometry. In particular, the
+campaign requires clearance proportional to conductor diameter and transition
+offset. Bounds enclose valid warm-start values instead of silently clipping
+them.
+
+### Pattern, lobe, and beamwidth goals
+
+Choose one of three pattern modes:
+
+| Mode | Useful-gain term | Additional pattern behavior |
+|---|---|---|
+| `horizon` | Horizon P10 gain | Penalizes insufficient horizon minimum and excess P90-P10 ripple. |
+| `directional` | Gain at requested theta/phi | Optionally targets HPBW on two orthogonal cuts. |
+| `peak` | Global peak gain | No directional or horizon-shape penalty. |
+
+Directional example:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
     --pattern directional `
     --target-theta 70 `
-    --target-phi 0 `
-    --target-beamwidth-deg 60 `
-    --beamwidth-weight 1
+    --target-phi 25 `
+    --hours 8
 ```
 
-The beamwidth penalty uses the RMS error of the elevation and azimuth HPBW
-values. With weight 1, a 10-degree RMS error adds 1 to the objective; adjust
-`--beamwidth-weight` to change that tradeoff against gain and matching. The
-HPBW threshold is 3 dB below gain at the requested lobe direction, and the
-contiguous lobe containing that direction is measured. `--angular-step`
-controls the far-field sampling resolution (2 degrees by default, at most 10
-degrees), not the beamwidth goal. Run `--help` for all objective weights and
-budget controls.
+`--target-theta` is the lobe's polar angle and `--target-phi` its azimuth. They
+default to 90 and 0 degrees. These options are unrelated to the physical
+ground-radial angle.
 
-### Final verification
+Add a half-power beamwidth goal with:
 
-Never accept an optimizer's coarse-mesh number without convergence testing.
-Verify a campaign winner with:
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --pattern directional `
+    --target-theta 70 `
+    --target-phi 25 `
+    --target-beamwidth-deg 60 `
+    --beamwidth-weight 1.5 `
+    --hours 8
+```
+
+The same target is applied to the two orthogonal great-circle cuts through the
+requested lobe. Their beamwidth errors are combined as RMS. The penalty is:
+
+```text
+beamwidth_weight * mean((beamwidth_error_degrees / 10)^2)
+```
+
+Thus 10 degrees is only the error-normalization scale: it is **not a hard-coded
+beamwidth goal**. With weight 1, a 10-degree RMS error adds 1 to the minimized
+score. Beamwidth is a soft objective and does not by itself decide feasibility.
+`--angular-step` controls far-field sampling resolution, not desired width.
+
+### Matching and physical constraints
+
+The robust campaign evaluates S11 at three frequencies spanning
+`--match-bandwidth-mhz`. For every point above `--s11-limit-db`, it adds a
+quadratic mismatch penalty. A small reward encourages margin beyond
+`--s11-margin-target-db` instead of making every barely feasible match equal.
+
+The minimized score is conceptually:
+
+```text
+mismatch penalty
++ pattern penalty
++ optional beamwidth penalty
++ height penalty
+- match-margin reward
+- useful gain
+```
+
+Main controls:
+
+| Option | Default | Purpose |
+|---|---:|---|
+| `--match-bandwidth-mhz` | wavelength-scaled 10 MHz at 868 MHz | Three-point S11 span. |
+| `--s11-limit-db` | `-10` | Maximum acceptable S11 at each match point. |
+| `--mismatch-weight` | `2` | Weight of squared S11 violations. |
+| `--s11-margin-target-db` | `-12` | Target for additional match margin. |
+| `--s11-margin-weight` | `0.10` | Match-margin reward weight. |
+| `--maximum-height-mm` | topology-dependent | Physical radiator-height limit. |
+| `--height-weight` | `0.10` | Weight of squared height excess. |
+| `--minimum-horizon-gain-dbi` | `2` | Horizon minimum target in horizon mode. |
+| `--null-weight` | `0.25` | Weight of horizon minimum deficit. |
+| `--maximum-ripple-db` | `1.5` | Allowed horizon P90-P10 ripple. |
+| `--ripple-weight` | `0.15` | Weight of excess ripple. |
+
+If height is not set, the campaign uses
+`(0.70 + 0.50 * maximum_coil_count) * wavelength`. Constraint violations are
+recorded separately so topology ranking can prefer feasible candidates.
+Simulation or geometry failures receive a finite penalty and remain visible in
+the evaluation log rather than aborting the campaign.
+
+### Budgets, seeds, restarts, and confirmation
+
+Choose exactly one campaign budget style:
+
+- `--maxiter N` gives each differential-evolution run N generations.
+- `--hours H` estimates an evaluation budget from `--seconds-per-eval`, divides
+  it across topology cases and seeds, and accounts for population dimension.
+
+The default population multiplier is 8. The default seed count is four for a
+broad campaign and two for fine tuning. Runs are sequential because EMerge and
+Gmsh maintain process-global state. For independent external parallelism, use
+separate processes and separate output directories, never threads.
+
+An apparent new best is repeated `--confirmation-runs` times (default 3, an odd
+number). The median score becomes the consensus; outliers beyond
+`--confirmation-score-tolerance` are recorded and unreliable candidates can be
+quarantined. Campaign metadata distinguishes optimizer candidate calls from
+physical simulation calls, because confirmation performs extra simulations.
+
+Ctrl-C is handled between evaluations. Atomic best-result files and completed
+run summaries remain available, but the campaign does not resume an incomplete
+differential-evolution population.
+
+### Automatic numerical preflight
+
+By default, optimization checks for a convergence certificate matching the
+frequency, numerical configuration, angular sampling, and numerical-reference
+design fingerprint. A valid passing certificate is reused. If none matches,
+the campaign runs the open-region convergence study automatically.
+
+Important distinctions:
+
+- The preflight design is a wavelength-scaled numerical reference independent
+  of the user's warm start and topology.
+- A failed preflight warns and continues unless `--require-convergence` is set.
+- `--no-auto-convergence` disables automatic certificate generation but still
+  permits checking an explicitly supplied report.
+- `--skip-convergence-check` bypasses the preflight completely; use it only for
+  development or when convergence has been established another way.
+- Always run convergence again on the final physical winner.
+
+### Campaign output files
+
+| File | Contents |
+|---|---|
+| `campaign_best.json` | Best campaign-wide design, metrics, objective terms, bounds, and provenance. |
+| `turns_<case>_best.json` | Current best for one discrete turn topology. |
+| `turns_<case>_seed_<seed>.json` | Completed run result for one topology and seed. |
+| `topology_leaderboard.json` | Ranked topology results with feasibility information. |
+| `run_summaries.json` | All completed optimizer-run summaries. |
+| `evaluations.csv` | Candidate-by-candidate variables, scores, metrics, failures, and confirmation data. |
+| `convergence_reference_design.json` | Numerical reference used by an automatic preflight. |
+
+The best-result JSON records the final physical design, search-space bounds,
+initial vector, topology, seed, objective components, S11 and far-field
+metrics, numerical settings, fixed wire diameter, and candidate/simulation
+counts. It can be passed directly to `--warm-start`, `verify_best.py`,
+`check_open_region.py`, or `load_design()`.
+
+### Optimizer option reference
+
+Run `python examples/optimize_gain.py --help` for the authoritative CLI. The
+options are grouped here by intent.
+
+Campaign and topology:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--frequency-mhz` | `868` | Target frequency. |
+| `--match-bandwidth-mhz` | scaled 10 MHz | Three-point match span. |
+| `--wire-diameter-mm`, `--wire-diameter` | inherited | Fixed conductor diameter. |
+| `--maxiter` / `--hours` | `20` iterations | Mutually exclusive generation or time budget. |
+| `--seconds-per-eval` | `8` | Estimate used to translate hours into evaluations. |
+| `--popsize` | `8` | Differential-evolution population multiplier. |
+| `--seeds` | broad `2,3,4,5`; fine `2,3` | Independent deterministic seeds. |
+| `--coil-count` | inherited | One fixed coil count. |
+| `--coil-counts` | inherited | Comma-separated one-turn topologies. |
+| `--turn-cases` | inherited | Explicit cases such as `none,1,1x2`. |
+| `--warm-start` | reference | Raw design or optimizer-result JSON. |
+| `--finetune`, `--fine-tune` | off | Independent coil dimensions and local refinement. |
+| `--output` | timestamped directory | New campaign output directory. |
+| `--report-every` | `10` | Console reporting interval in candidate calls. |
+
+Fine-tuning controls:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--finetune-near-radius` | `0.03` | Normalized near-start population radius. |
+| `--finetune-wide-radius` | `0.10` | Normalized wider-start population radius. |
+| `--finetune-mutation MIN MAX` | `0.20 0.60` | Differential-evolution mutation range. |
+| `--finetune-recombination` | `0.30` | Differential-evolution recombination. |
+| `--restart-stagnation-generations` | `10` | Generations without progress before restart. |
+| `--restart-min-improvement` | `0.05` | Score improvement required to reset stagnation. |
+| `--local-search-evaluations` | `24` | Bounded local-search budget. |
+| `--local-search-step` | `0.03` | Initial normalized coordinate step. |
+| `--local-search-min-step` | `0.001` | Smallest normalized step. |
+| `--local-search-elites` | `3` | Number of elite starts for local search. |
+
+Pattern and objective:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--pattern` | `horizon` | `horizon`, `directional`, or `peak`. |
+| `--target-theta` | `90` degrees | Requested directional-lobe polar angle. |
+| `--target-phi` | `0` degrees | Requested directional-lobe azimuth. |
+| `--target-beamwidth-deg` | disabled | HPBW target on both orthogonal cuts; directional mode only. |
+| `--beamwidth-weight` | `1` | Beamwidth-error penalty weight. |
+| `--maximum-height-mm` | automatic | Maximum radiator height. |
+| `--s11-limit-db` | `-10` | Match constraint at every sampled frequency. |
+| `--mismatch-weight` | `2` | S11 violation weight. |
+| `--s11-margin-target-db` | `-12` | Extra-match-margin target. |
+| `--s11-margin-weight` | `0.10` | Match-margin reward weight. |
+| `--confirmation-runs` | `3` | Odd number of incumbent repeat solves. |
+| `--confirmation-score-tolerance` | `1` | Allowed confirmation-score spread. |
+| `--minimum-horizon-gain-dbi` | `2` | Minimum-gain target in horizon mode. |
+| `--null-weight` | `0.25` | Horizon minimum-deficit weight. |
+| `--maximum-ripple-db` | `1.5` | Horizon P90-P10 ripple target. |
+| `--ripple-weight` | `0.15` | Excess-ripple weight. |
+| `--height-weight` | `0.10` | Height-excess weight. |
+
+Numerics and convergence:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--angular-step` | `2` degrees | Far-field grid spacing; greater than 0 and at most 10. |
+| `--air-margin-wavelengths` | `0.25` | Structure-to-Huygens air margin. |
+| `--abc-buffer-wavelengths` | `1.0` | Huygens-to-ABC ordinary-air buffer. |
+| `--wavelength-resolution` | `0.33` | Free-space mesh wavelength factor. |
+| `--solver` | `auto` | EMerge linear solver backend. |
+| `--convergence-report` | frequency-specific | Certificate to validate or create. |
+| `--skip-convergence-check` | off | Bypass convergence preflight. |
+| `--no-auto-convergence` | off | Do not generate a missing certificate. |
+| `--require-convergence` | off | Abort unless a matching certificate passes. |
+| `--polish` | off | Enable SciPy broad-search polishing. Fine mode has its own local search. |
+
+## Custom optimization API
+
+The library-level optimizer tools support smaller custom studies without the
+campaign script. A `DesignVariable` targets a dataclass field using a dotted
+path; tuple indices are supported. `linked_paths` changes several physical
+fields with one optimizer coordinate.
+
+```python
+from emerge_loaded_antenna import (
+    DesignSpace,
+    DesignVariable,
+    FrequencySweep,
+    S11Objective,
+    SimulationOptions,
+    load_reference_design,
+)
+
+base = load_reference_design(868e6)
+space = DesignSpace(
+    base=base,
+    variables=(
+        DesignVariable("straight_lengths.0", 0.10, 0.30, label="bottom length"),
+        DesignVariable("radial_length", 0.05, 0.14),
+        DesignVariable(
+            "coils.0.radius",
+            0.006,
+            0.025,
+            linked_paths=("coils.1.radius",),
+        ),
+    ),
+)
+
+print(space.names)
+print(space.bounds)
+print(space.initial_vector)
+candidate = space.decode(space.initial_vector)
+
+objective = S11Objective(
+    space,
+    target_frequency=868e6,
+    options=SimulationOptions(sweep=FrequencySweep.single(868e6)),
+)
+score = objective(space.initial_vector)
+print(score, objective.records[-1])
+```
+
+`DesignSpace` can normalize and denormalize vectors and validates decoded
+designs before simulation. `S11Objective` minimizes single-frequency S11.
+`GainMatchObjective` combines peak gain with an S11 ceiling.
+`RobustGainObjective` is the campaign-grade three-point matching, pattern,
+height, beamwidth, and confirmation objective. Optional evaluation and
+confirmation callbacks can stream records into another optimizer or database.
+
+EMerge/Gmsh model construction is process-global. Evaluate one objective at a
+time in a process. Use process-based parallelism only when each worker has an
+independent process and output location.
+
+## Verify a winning design
+
+`verify_best.py` runs an optional coarse solve and a finer solve, compares the
+metrics, saves JSON, and plots the impedance and patterns:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\verify_best.py `
-    .\optimization_results\868mhz_YYYYMMDD_HHMMSS\campaign_best.json `
-    --show-model `
-    --show-mesh `
-    --show-3d
+    optimization_results\868mhz_horizon\campaign_best.json `
+    --frequency-points 13 `
+    --angular-step 0.5
 ```
 
-This repeats the design on coarse and fine meshes, samples the 3D pattern at
-0.5-degree resolution, infers the target frequency from the campaign result,
-reports peak direction and horizon statistics, and saves S11, XY/horizon and
-XZ/YZ/XY plots plus JSON convergence data. `--show-model` opens the final
-geometry before meshing, `--show-mesh` opens its generated surface mesh, and
-`--show-3d` displays the solved far-field lobe. The model and mesh viewers are
-only enabled for the fine verification solve, not the preliminary coarse solve.
-For a final seven-probe open-region certificate on the actual winner, run:
+The solve frequency is inferred from optimizer metadata when possible. The
+default sweep is the wavelength-scaled equivalent of 30 MHz at 868 MHz. The
+fine mesh uses eight wire sections, a 2x antenna surface factor, 6x radial
+factor, 2x feed factor, 20 curved-boundary segments, 0.33-wavelength volume
+resolution, and a 0.30-wavelength air margin.
+
+Verification output includes:
+
+- `verification.json` with coarse and fine metrics;
+- `s11_verified.png`;
+- `horizon_gain.png`;
+- `principal_plane_gain.png`.
+
+Use `--show-model`, `--show-mesh`, or `--show-3d` for interactive inspection,
+and `--skip-coarse` when only the fine run is needed. A warning is emitted for
+material coarse/fine metric disagreement; investigate it rather than treating
+the optimizer score as final truth.
+
+## Open-region convergence
+
+Run the convergence study on the final result:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\check_open_region.py `
-    .\optimization_results\915mhz_YYYYMMDD_HHMMSS\campaign_best.json
+    optimization_results\868mhz_horizon\campaign_best.json
 ```
 
-The initial reference preflight establishes sane campaign numerics; this final
-design-specific check is the evidence to use when reporting the winning gain.
-
-EMerge and Gmsh use process-global model state. Sequential evaluations in one
-process are supported and tested. Use separate processes—not worker threads—
-for parallel optimization.
-
-The script imports:
-
-```python
-import numpy as np
-import emerge as em
-
-from emerge.plot import plot_sp, plot_ff, smith
-```
-
-## How the Geometry Is Constructed
-
-The default two-coil antenna is generated as one continuous sequence:
-
-```text
-feed
- ↓
-bottom straight
- ↓
-smooth transition
- ↓
-coil 1
- ↓
-smooth transition
- ↓
-middle straight
- ↓
-smooth transition
- ↓
-coil 2
- ↓
-smooth transition
- ↓
-top straight
-```
-
-The independent curve pieces are assembled into one OpenCASCADE wire:
-
-```python
-antenna_curve = CompositeCurve(path.segments)
-```
-
-EMerge then sweeps a circular cross-section along this centerline:
-
-```python
-antenna = antenna_curve.pipe(wire_section)
-```
-
-This produces the actual 3D copper conductor.
-
-## Why the Coil Transitions Are Smooth
-
-Simply joining a vertical line and a helix produces a discontinuous tangent:
-
-```text
-helix
-   /
-  /
- /
-│
-│ straight
-```
-
-That represents an infinitely sharp bend, which is not representative of a real bent wire.
-
-This script instead uses compact cubic Hermite connectors. Each connector
-starts vertically and arrives tangent to the constant-pitch helix. A small
-chord offset controls how far it travels around the coil, independently of
-pitch, so a 6 mm connector no longer creates a broad sweeping elbow.
-
-In practical terms:
-
-```text
-Straight
-   │
-   │
-   ╰────╮
-        ╰──╮
-           ╰──── helix
-```
-
-rather than:
-
-```text
-Straight
-   │
-   │
-   └──────── helix
-```
-
-## Main Parameters
-
-All physical dimensions live in immutable `AntennaDesign` and `CoilDesign`
-objects. SI units are used throughout, so dimensions are specified in metres.
-
-```python
-from emerge_loaded_antenna import AntennaDesign, CoilDesign
-
-design = AntennaDesign(
-    wire_radius=1.0e-3,
-    radial_length=0.072,
-    radial_angle_deg=45.0,
-    radial_count=4,
-    straight_lengths=(0.120, 0.221, 0.150),
-    coils=(
-        CoilDesign(
-            radius=0.010,
-            turns=1,
-            pitch=0.007,
-            transition=0.006,
-            transition_offset=0.00475,
-            handedness="RH",
-        ),
-        CoilDesign(
-            radius=0.010,
-            turns=1,
-            pitch=0.007,
-            transition=0.006,
-            transition_offset=0.00475,
-            handedness="RH",
-        ),
-    ),
-)
-```
-
-The rule is simple: `N` coils require `N + 1` straight lengths. A zero-coil
-design is therefore just:
-
-```python
-design = AntennaDesign(straight_lengths=(86e-3,), coils=())
-```
-
-Add entries to both tuples to create three or more coils.
-
-The coil radius is measured to the wire centerline, so its approximate outside
-diameter is `2 * (coil.radius + design.wire_radius)`. Pitch is the axial rise
-per complete revolution. Transition length controls the local entry/exit bend;
-transition offset sets the chord distance from the straight axis to the helix
-join independently of pitch.
-
-Coil turns must currently be positive integers. Handedness may be `"RH"` or
-`"LH"`, independently for each coil.
-
-Because designs are frozen and safe to reuse, change one parameter with
-`dataclasses.replace`:
-
-```python
-from dataclasses import replace
-
-lengths = list(design.straight_lengths)
-lengths[1] = 0.225
-coils = list(design.coils)
-coils[0] = replace(coils[0], pitch=0.0065)
-candidate = replace(
-    design,
-    straight_lengths=tuple(lengths),
-    coils=tuple(coils),
-)
-```
-
-## Geometry Resolution
-
-### Preview Sampling
-
-```python
-POINTS_PER_TURN = 20
-```
-
-This controls only the sampled coordinates used for reporting dimensions and
-computing the air-box bounds. It does not control the CAD or mesh complexity.
-The actual helix uses three tangent-continuous cubic Bezier arcs per turn.
-
-### Wire Cross-Section
-
-```python
-WIRE_SECTIONS = 6
-```
-
-The circular wire cross-section is represented by a polygon.
-
-For example:
-
-```text
-6  = hexagonal approximation
-8  = octagonal approximation
-12 = smoother
-16 = smoother again
-```
-
-Increasing this value increases mesh complexity.
-
-For initial antenna optimization, 6–8 sections will usually be considerably faster than using a very finely segmented conductor.
-
-## Simulation Frequency
-
-The default sweep targets the 868 MHz ISM/SRD region:
-
-```python
-from emerge_loaded_antenna import FrequencySweep
-
-sweep = FrequencySweep(center=868e6, span=100e6, points=5)
-```
-
-The center frequency is always included when `points` is odd. Use
-`FrequencySweep.single(868e6)` for inexpensive optimizer evaluations.
-
-The antenna dimensions supplied with the script are **examples only** and are not claimed to form a properly tuned 868 MHz antenna.
-
-## Feed
-
-Feed dimensions and reference impedance are part of the design:
-
-```python
-design = AntennaDesign(
-    port_height=2e-3,
-    port_impedance=50.0,
-)
-```
-
-A short cylindrical lumped-port region is created from the grounded hub to
-the antenna. The feed volume intentionally has no copper material assignment. Its side
-surface carries the EMerge lumped-port boundary condition, while the solid
-radial hub beneath it supplies the ground reference. Assigning copper to the
-feed suppresses the port field and produces a flat 0 dB S11 response.
-
-## Open Air Region and Far-Field Surface
-
-The antenna is enclosed by a closed inner air box. Its six faces form the
-Huygens integration surface used for every 2D and 3D far-field calculation.
-The clearance defaults to a quarter wavelength:
-
-```python
-mesh = MeshSettings(air_margin_wavelengths=0.25)
-```
-
-where:
-
-```text
-wavelength = c / frequency
-```
-
-At 868 MHz, free-space wavelength is approximately:
-
-```text
-345 mm
-```
-
-so a quarter wavelength is approximately:
-
-```text
-86 mm
-```
-
-This is not the termination boundary. A separate ordinary-air shell extends a
-further wavelength by default, and a second-order absorbing boundary condition
-is applied to every exterior face:
-
-```python
-from emerge_loaded_antenna import OpenRegionSettings, SimulationOptions
-
-options = SimulationOptions(
-    open_region=OpenRegionSettings(
-        mode="abc",
-        abc_buffer_wavelengths=1.0,
-    ),
-)
-```
-
-The bottom is included. It is never left unassigned for EMerge to turn into a
-PEC wall. Keeping the inner Huygens surface separate from the outer termination
-also prevents boundary placement from changing the integration surface.
-
-An all-sided PML is available for high-memory reference runs:
-
-```python
-options = SimulationOptions(
-    open_region=OpenRegionSettings(
-        mode="pml",
-        pml_thickness_wavelengths=0.25,
-        pml_mesh_layers=5,
-    ),
-)
-```
-
-The PML creates 26 edge/face/corner blocks around the inner box and is far more
-expensive than the buffered ABC. It is intended for final cross-checks rather
-than thousands of optimizer evaluations.
-
-## Meshing
-
-The antenna conductor remains one continuous swept volume. Its path is a
-composite wire of exact straight lines, local transition curves, and three
-Bezier arcs per helical turn. This avoids both coincident-volume PLC errors and
-unnecessary triangulation along straight sections.
-
-`MeshSettings(antenna_size_factor=3.0)` sets the antenna maximum element size
-to three wire radii. This setting is tested with both one- and two-turn coils.
-
-The equivalent global and curved-boundary settings are also configurable:
-
-```python
-mesh = MeshSettings(
-    wavelength_resolution=0.33,
-    curved_boundary_segments=12,
-)
-```
-
-The curved-boundary factor is moderate because each curved segment is compact
-and local. The script prints current node, total-element, and volume-element
-counts after every mesh build.
-
-Mesh settings strongly affect both simulation accuracy and run time.
-
-It is usually best to use a relatively coarse mesh while exploring antenna dimensions, then rerun promising designs with progressively finer settings.
-
-## Geometry Preview
-
-Enable:
-
-```python
-SHOW_GEOMETRY = True
-```
-
-to open the EMerge geometry viewer before meshing.
-
-This is strongly recommended while developing the antenna.
-
-You should verify that:
-
-* every configured coil has the expected number of turns,
-* the straight sections are correctly aligned,
-* the transitions are smooth,
-* the conductor does not self-intersect,
-* the wire diameter is correct,
-* the feed joins the antenna correctly.
-
-Set:
-
-```python
-SHOW_GEOMETRY = False
-```
-
-when performing automated parameter sweeps.
-
-## Mesh Preview
-
-To inspect the generated FEM mesh:
-
-```python
-SHOW_MESH = True
-```
-
-The preview renders boundary triangles in wireframe mode, so element edges are
-visible instead of only the metallic material shading. Internal air-volume
-tetrahedra are intentionally hidden; displaying them produces the dense web of
-crossing magenta lines that can be mistaken for geometry artifacts.
-
-For normal repeated simulations:
-
-```python
-SHOW_MESH = False
-```
-
-is more convenient.
-
-## Running Without Solving
-
-To generate and inspect geometry without performing the electromagnetic simulation:
-
-```python
-RUN_SOLVER = False
-```
-
-This is useful while adjusting antenna dimensions.
-
-Once the geometry looks correct:
-
-```python
-RUN_SOLVER = True
-```
-
-## Choosing a Linear Solver
-
-EMerge selects a linear solver automatically by default. Override it from the
-interactive example with:
-
-```powershell
-.\.venv\Scripts\python.exe .\main.py --solver pardiso
-```
-
-Available names are `auto`, `superlu`, `umfpack`, `pardiso`, `cudss`, `mumps`,
-`aasds`, and `cholmod`. Optional backends must be installed before use. On
-Windows with an NVIDIA GPU, install EMerge's CUDA 12 CuDSS dependencies with:
+The tool independently varies air margin, ABC buffer, and wavelength mesh
+resolution in isolated worker solves. Defaults are:
+
+| Study axis | Probe values | Selected value |
+|---|---|---:|
+| Air margin | `0.20, 0.25, 0.35` wavelength | `0.25` |
+| ABC buffer | `0.75, 1.00, 1.25` wavelength | `1.00` |
+| Mesh resolution | `0.50, 0.33, 0.25` wavelength | `0.33` |
+
+The default angular step is 4 degrees and per-sample timeout is 600 seconds.
+The resulting schema-versioned certificate contains the design fingerprint,
+frequency, numerical settings, samples, metric deltas, individual checks, and
+overall pass/fail state. It checks reflection magnitude, peak and horizon gain,
+ripple, and peak-direction stability.
+
+Use `--air-margins`, `--abc-buffers`, and `--mesh-resolutions` to widen the
+study. The value lists must include a stricter probe than each selected value.
+Do not reuse a certificate for another design or numerical configuration; the
+validation helpers reject mismatched metadata.
+
+## Solvers and performance
+
+Accepted solver names are `auto`, `superlu`, `umfpack`, `pardiso`, `cudss`,
+`mumps`, `aasds`, and `cholmod`. Availability depends on the local EMerge
+installation. Start with `auto`, then benchmark an installed sparse direct
+solver on the actual mesh size.
+
+For example, install EMerge's CuDSS integration when supported:
 
 ```powershell
 .\.venv\Scripts\emerge.exe install-solver cudss
 ```
 
-Then run:
+Optimization cost is dominated by full-wave solves. Before committing to a
+long run:
+
+- time several representative evaluations and set `--seconds-per-eval`;
+- use broad mode before fine mode;
+- compare only plausible topology cases;
+- keep the optimizer mesh fixed within one campaign;
+- use multiple seeds rather than trusting one stochastic run;
+- reserve a separate budget for verification and convergence.
+
+A finer angular step increases far-field sampling cost and is especially
+important for narrow directional lobes and beamwidth objectives.
+
+## Interpreting results
+
+- **Feasible beats merely high-gain.** Check every S11 point, height, pattern
+  constraints, and the topology leaderboard's feasibility fields.
+- **P10 is robust horizon gain.** In horizon mode, 90% of azimuth samples are
+  at or above P10; it is less sensitive to one isolated numerical spike than
+  peak gain.
+- **Beamwidth is a tradeoff.** It is a weighted soft penalty. Inspect both cut
+  widths and requested-direction gain in the JSON instead of only total score.
+- **A best candidate is not yet a validated antenna.** Confirmation reduces
+  solver noise; it does not replace mesh/open-region convergence or measurement.
+- **Scores compare only like-for-like campaigns.** Changing weights, match
+  span, far-field step, solver settings, or numerical domain changes the score.
+- **Topology rankings include search quality.** A topology with a weak budget
+  may rank poorly because it was underexplored, not because it is impossible.
+
+## Troubleshooting
+
+**The campaign rejects the output directory.** Choose a new or empty directory.
+Campaigns intentionally do not merge with or resume old populations.
+
+**A warm start is outside the normal bounds.** Valid warm-start dimensions
+expand the wavelength-based bounds. Invalid geometry still fails validation;
+the optimizer does not clip it into a different antenna.
+
+**A thick wire makes the search space invalid.** Coil pitch, radius,
+transition, straight, and radial bounds include diameter-dependent clearance.
+Reduce the requested diameter or choose a frequency/topology with enough
+physical room.
+
+**`--target-beamwidth-deg` is rejected.** It requires
+`--pattern directional`. The target must be greater than zero and no more than
+360 degrees.
+
+**The lobe points in the wrong direction.** Confirm the spherical convention:
+theta is measured from +Z and phi from +X toward +Y. Do not confuse target
+theta with `radial_angle_deg`, which controls the physical ground radials.
+
+**The beamwidth looks quantized.** Reduce `--angular-step` and verify with the
+0.5-degree default used by `verify_best.py`. A grid cannot resolve features
+much smaller than its sampling interval.
+
+**Repeated evaluations differ.** Use incumbent confirmation, review the
+recorded score spread, and run convergence checks. Solver or mesh sensitivity
+can make tiny score differences meaningless.
+
+**A solver name is accepted but fails.** The CLI lists supported EMerge backend
+names, not what is installed locally. Select `auto`, install the desired native
+backend, or consult EMerge's solver setup.
+
+**A long run stops.** Inspect `campaign_best.json`, topology best files,
+`evaluations.csv`, and completed run summaries. These are written incrementally
+and atomically where appropriate, but an interrupted evolutionary population
+cannot be resumed.
+
+## Development and project layout
+
+```text
+emerge_loaded_antenna/
+  config.py          physical and numerical configuration
+  geometry.py        continuous radiator centerline construction
+  simulation.py      EMerge model, solve, and far-field metrics
+  optimize.py        reusable design spaces and objectives
+  presets.py         tracked reference design and scaling
+  serialization.py   design JSON helpers
+  convergence.py     convergence-certificate validation
+  data/              versioned reference design
+examples/
+  optimize_gain.py   campaign optimizer
+  verify_best.py     independent fine verification and plots
+  check_open_region.py numerical convergence study
+main.py              editable interactive example
+tests/               geometry, simulation, optimizer, and campaign tests
+```
+
+Run the checks from the repository root:
 
 ```powershell
-.\.venv\Scripts\python.exe .\main.py --solver cudss
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-The optimization and verification scripts accept the same `--solver` flag.
-An unavailable backend fails before meshing starts.
-
-## S11 Results
-
-After solving, the script displays S11 using:
-
-```python
-plot_sp(
-    glob.freq,
-    glob.S(1, 1),
-)
-```
-
-and a Smith chart using:
-
-```python
-smith(
-    glob.S(1, 1),
-    f=glob.freq,
-)
-```
-
-For antenna tuning, the main quantity of interest initially is usually:
-
-```text
-S11
-```
-
-around the desired operating frequency.
-
-For a 50 Ω antenna system, a common first target might be:
-
-```text
-S11 < -10 dB
-```
-
-across the required operating band.
-
-Lower is generally better at the target frequency, but impedance match alone does not guarantee good radiation efficiency.
-
-## Far-Field Calculation
-
-The script calculates complete total-gain cuts through all three principal
-planes at the target frequency:
-
-```text
-X-Z elevation plane
-Y-Z elevation plane
-X-Y azimuth plane
-```
-
-It reports peak isotropic gain, peak direction, plane-average gain, approximate
-3 dB beamwidth and front-to-back ratio for every cut.
-
-When enabled, the interactive 3D total-gain lobe is shown with the antenna for
-orientation:
-
-```python
-SHOW_3D_FARFIELD = True
-FARFIELD_DB_FLOOR = -30
-```
-
-The 3D report includes peak gain plus spherical theta/phi and elevation.
-
-This can be expanded later to investigate:
-
-* antenna efficiency,
-* directivity,
-* polarization,
-* gain across the full frequency sweep.
-
-## Changing the Antenna
-
-Construct a new design or use `dataclasses.replace` to derive one from a
-known baseline. Nested coils can be replaced independently:
-
-```python
-from dataclasses import replace
-
-candidate = replace(
-    design,
-    wire_radius=0.5e-3,
-    straight_lengths=(90e-3, 120e-3, 80e-3),
-    coils=(
-        replace(design.coils[0], radius=8e-3, turns=8, pitch=2.5e-3),
-        replace(design.coils[1], radius=8e-3, turns=5, pitch=2.5e-3),
-    ),
-)
-```
-
-The geometry and simulation regenerate from the candidate automatically.
-
-## Automatic Optimization
-
-The `DesignSpace` adapter exposes scalar and integer parameters using dotted
-paths, including nested coil fields such as:
-
-```text
-straight_lengths.0
-coils.0.radius
-coils.0.turns
-coils.0.pitch
-straight_lengths.1
-coils.1.radius
-coils.1.turns
-coils.1.pitch
-straight_lengths.2
-```
-
-A variable can intentionally control several fields. This is how the campaign
-shares coil geometry during its broad phase:
-
-```python
-DesignVariable(
-    "coils.0.pitch",
-    4e-3,
-    12e-3,
-    linked_paths=("coils.1.pitch", "coils.2.pitch"),
-    label="shared_coil_pitch",
-)
-```
-
-Those variables can then be passed to an objective such as:
-
-```text
-minimize |S11| at 868 MHz
-```
-
-or, more realistically:
-
-```text
-minimize worst-case S11 from 863–870 MHz
-```
-
-`S11Objective`, `GainMatchObjective`, and `RobustGainObjective` are directly
-callable by SciPy and other minimizers. They decode vectors, validate and
-simulate candidates, keep history, invoke optional per-evaluation callbacks,
-and return a finite penalty when a candidate cannot be meshed or solved.
-
-A typical workflow could become:
-
-```text
-Choose dimensions
-       ↓
-Generate smooth centerline
-       ↓
-Sweep copper conductor
-       ↓
-Generate mesh
-       ↓
-Run EMerge
-       ↓
-Read S11
-       ↓
-Optimizer changes dimensions
-       ↓
-Repeat
-```
-
-This is considerably easier than regenerating geometry in FreeCAD and repeatedly exporting STEP files.
-
-## Why Use EMerge Directly Instead of FreeCAD?
-
-FreeCAD is still useful when the simulation needs mechanically complex objects such as:
-
-* antenna housings,
-* brackets,
-* PCB assemblies,
-* mounting hardware,
-* radomes,
-* nearby metallic structures.
-
-For the radiating wire itself, however, direct programmatic generation has several advantages:
-
-* exact control over dimensions,
-* one continuous 3D centerline,
-* smooth coil transitions,
-* easy parameter changes,
-* automatic optimization,
-* no STEP export/import loop,
-* geometry and simulation remain in the same script.
-
-A useful combined workflow may eventually be:
-
-```text
-Programmatic antenna wire
-        ↓
-      EMerge
-        ↑
-STEP geometry from FreeCAD
-for housing / PCB / enclosure
-```
-
-## Important Modeling Notes
-
-### The Coil Radius Is a Centerline Radius
-
-If:
-
-```python
-design = AntennaDesign(
-    wire_radius=0.75e-3,
-    straight_lengths=(140e-3, 140e-3),
-    coils=(CoilDesign(radius=10e-3),),
-)
-```
-
-the physical outer radius of the coil is approximately:
-
-```text
-10.75 mm
-```
-
-and the outside diameter is approximately:
-
-```text
-21.5 mm
-```
-
-### Transition Length Is Independent of Pitch
-
-The entrance and exit connector lengths are added around the constant-pitch
-portion and may be longer than `turns * pitch`.
-
-The two connectors use a small chord allowance set by
-`CoilDesign.transition_offset`; the remaining requested rotation uses the
-specified constant pitch. Consequently, connector length can be selected for
-bend quality without imposing a minimum coil pitch. The exact axial height is:
-
-```text
-2 x transition + turns x pitch - join_angle x pitch / pi
-```
-
-where `join_angle = 2 x asin(offset / (2 x radius))` in radians.
-
-Each long straight is one exact CAD line with only two endpoints. Its length
-therefore does not increase centerline complexity, and no guard points are
-needed to keep it straight at a coil junction.
-
-### Integer Turns
-
-The current implementation expects an integer number of turns.
-
-This is intentional because after:
-
-```text
-N × 360°
-```
-
-the helix naturally returns to the same side of its axis, allowing the following straight section to lie on exactly the same vertical centerline.
-
-Support for fractional turns could be added, but the outgoing straight would then need either:
-
-* a shifted position,
-* another smooth correction section, or
-* a different coil geometry.
-
-## Suggested Development Workflow
-
-1. Set `RUN_SOLVER = False`.
-2. Enter the approximate physical antenna dimensions.
-3. Inspect the geometry with `SHOW_GEOMETRY = True`.
-4. Confirm all smooth transitions visually.
-5. Enable the solver.
-6. Run a relatively coarse frequency sweep.
-7. Adjust the antenna dimensions based on S11.
-8. Automate the parameter search.
-9. Refine the mesh around promising designs.
-10. Evaluate S11, efficiency and radiation pattern together.
-
-## Future Improvements
-
-Useful additions to this script would include:
-
-* automatic parameter optimization,
-* CSV logging of each simulated design,
-* automatic extraction of resonant frequency,
-* bandwidth calculation,
-* radiation efficiency calculation,
-* realized gain optimization,
-* multiple frequency-band objectives,
-* support for fractional turns,
-* arbitrary coil orientation,
-* different coil radii for each transition,
-* tapered coils,
-* exporting generated antenna geometry,
-* importing a PCB or enclosure from STEP,
-* batch-running parameter studies without opening the viewer.
-
-## Summary
-
-The script models the antenna as:
-
-```text
-one mathematical centerline
-          +
-smooth straight/helix transitions
-          +
-circular conductor sweep
-          =
-one continuous 3D antenna
-```
-
-This approach is well suited to EMerge because the geometry can be generated, modified, meshed and simulated entirely from Python.
-
-For antenna experimentation and automated tuning, this is generally more convenient than constructing the wire in FreeCAD and exporting a new STEP file after every dimensional change.
+The test suite mocks expensive EMerge paths where appropriate and also tests
+geometry invariants, serialization, campaign scheduling, objective accounting,
+beamwidth measurement, CLI validation, and convergence certificates.
+
+## Modeling scope
+
+The current model is an idealized free-space antenna study. It includes the
+radiator, swept finite-radius conductor, feed region, radial ground system,
+closed Huygens surface, and all-face ABC or PML termination. It does not by
+itself model every practical installation detail, such as connector launch,
+cable common-mode current, finite conductivity and surface finish, dielectric
+supports, enclosure coupling, nearby structures, soil, weather, or fabrication
+tolerance.
+
+Treat optimization as a disciplined way to generate and compare candidates.
+Treat fine-mesh verification, numerical convergence, tolerance analysis, and
+physical measurement as separate required stages before relying on a design.
