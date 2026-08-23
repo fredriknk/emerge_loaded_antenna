@@ -29,6 +29,7 @@ from examples.optimize_gain import (
     CampaignProgress,
     CaseSchedule,
     GenerationMonitor,
+    apply_design_overrides,
     build_case_schedules,
     build_finetune_population,
     default_maximum_height,
@@ -50,6 +51,99 @@ from examples.optimize_gain import (
 
 
 class CampaignTests(unittest.TestCase):
+    def test_cli_accepts_fixed_wire_diameter_and_radial_angle(self):
+        with patch(
+            "sys.argv",
+            [
+                "optimize_gain.py",
+                "--wire-diameter-mm",
+                "1.6",
+                "--radial-angle-deg",
+                "72.5",
+            ],
+        ):
+            fixed = parse_args()
+        with patch("sys.argv", ["optimize_gain.py"]):
+            optimized = parse_args()
+
+        self.assertEqual(fixed.wire_diameter_mm, 1.6)
+        self.assertEqual(fixed.radial_angle_deg, 72.5)
+        self.assertIsNone(optimized.wire_diameter_mm)
+        self.assertIsNone(optimized.radial_angle_deg)
+
+    def test_cli_rejects_invalid_fixed_geometry_values(self):
+        invalid_cases = (
+            ("--wire-diameter-mm", "0"),
+            ("--wire-diameter-mm", "-1"),
+            ("--wire-diameter-mm", "nan"),
+            ("--wire-diameter-mm", "inf"),
+            ("--radial-angle-deg", "0"),
+            ("--radial-angle-deg", "90"),
+            ("--radial-angle-deg", "nan"),
+            ("--radial-angle-deg", "inf"),
+        )
+
+        for flag, value in invalid_cases:
+            with (
+                self.subTest(flag=flag, value=value),
+                patch("sys.argv", ["optimize_gain.py", flag, value]),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args()
+
+    def test_design_overrides_convert_diameter_and_leave_input_unchanged(self):
+        original = AntennaDesign(wire_radius=0.7e-3, radial_angle_deg=60.0)
+
+        overridden = apply_design_overrides(
+            original,
+            wire_diameter_mm=2.4,
+            radial_angle_deg=72.5,
+        )
+
+        self.assertIsNot(overridden, original)
+        self.assertAlmostEqual(overridden.wire_radius, 1.2e-3)
+        self.assertEqual(overridden.radial_angle_deg, 72.5)
+        self.assertAlmostEqual(original.wire_radius, 0.7e-3)
+        self.assertEqual(original.radial_angle_deg, 60.0)
+
+    def test_fixed_radial_angle_is_omitted_from_direct_search_space(self):
+        design = AntennaDesign(radial_angle_deg=72.5)
+
+        optimized = make_space(design)
+        fixed = make_space(design, optimize_radial_angle=False)
+
+        self.assertIn("radial_angle_deg", optimized.names)
+        self.assertNotIn("radial_angle_deg", fixed.names)
+        self.assertEqual(fixed.base.radial_angle_deg, 72.5)
+
+    def test_case_schedules_only_optimize_an_unspecified_radial_angle(self):
+        common = {
+            "seeds": (2,),
+            "turn_cases": ((),),
+            "maxiter": 0,
+            "hours": None,
+            "seconds_per_eval": 1.0,
+            "popsize": 1,
+            "finetune": False,
+        }
+        initial = AntennaDesign(radial_angle_deg=72.5)
+
+        optimized = build_case_schedules(
+            Namespace(**common, radial_angle_deg=None),
+            initial,
+            REFERENCE_DESIGN_FREQUENCY_HZ,
+        )[0]
+        fixed = build_case_schedules(
+            Namespace(**common, radial_angle_deg=72.5),
+            initial,
+            REFERENCE_DESIGN_FREQUENCY_HZ,
+        )[0]
+
+        self.assertIn("radial_angle_deg", optimized.space.names)
+        self.assertNotIn("radial_angle_deg", fixed.space.names)
+        self.assertEqual(fixed.space.base.radial_angle_deg, 72.5)
+        self.assertEqual(len(optimized.space.variables), len(fixed.space.variables) + 1)
+
     def test_search_modes_choose_safe_optimizer_defaults(self):
         with patch("sys.argv", ["optimize_gain.py"]):
             broad = parse_args()
@@ -689,6 +783,10 @@ class CampaignTests(unittest.TestCase):
                     "optimize_gain.py",
                     "--coil-counts",
                     "0,1,3",
+                    "--wire-diameter-mm",
+                    "1.6",
+                    "--radial-angle-deg",
+                    "32",
                     "--seeds",
                     "2",
                     "--maxiter",
@@ -743,6 +841,21 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(
                 best["simulation"]["search_bounds"]["policy"],
                 "wavelength_wire_v1",
+            )
+            self.assertAlmostEqual(best["design"]["wire_radius"], 0.8e-3)
+            self.assertEqual(best["design"]["radial_angle_deg"], 32.0)
+            self.assertNotIn("radial_angle_deg", best["search_space"]["bounds"])
+            self.assertAlmostEqual(
+                best["simulation"]["search_bounds"]["wire_diameter_m"],
+                1.6e-3,
+            )
+            self.assertEqual(
+                best["simulation"]["search_bounds"]["wire_diameter_source"],
+                "command_line",
+            )
+            self.assertEqual(
+                best["simulation"]["search_bounds"]["radial_angle_mode"],
+                "fixed_command_line",
             )
             self.assertAlmostEqual(
                 best["simulation"]["search_bounds"]["maximum_height_wavelengths"],

@@ -240,10 +240,36 @@ def design_for_turn_case(
     )
 
 
+def apply_design_overrides(
+    design: AntennaDesign,
+    wire_diameter_mm: float | None = None,
+    radial_angle_deg: float | None = None,
+) -> AntennaDesign:
+    """Apply fixed physical CLI parameters to a starting design."""
+    updates = {}
+    if wire_diameter_mm is not None:
+        if not np.isfinite(wire_diameter_mm) or wire_diameter_mm <= 0:
+            raise ValueError("wire_diameter_mm must be finite and positive")
+        updates["wire_radius"] = float(wire_diameter_mm) * 1e-3 / 2
+    if radial_angle_deg is not None:
+        if not np.isfinite(radial_angle_deg) or not 0 < radial_angle_deg < 90:
+            raise ValueError(
+                "radial_angle_deg must be finite and between 0 and 90"
+            )
+        updates["radial_angle_deg"] = float(radial_angle_deg)
+    if not updates:
+        return design
+    overridden = replace(design, **updates)
+    overridden.validate()
+    return overridden
+
+
 def make_space(
     base: AntennaDesign,
     frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
     finetune: bool = False,
+    *,
+    optimize_radial_angle: bool = True,
 ) -> DesignSpace:
     """Create wavelength-scaled bounds for broad or fine topology searches."""
     wavelength = free_space_wavelength(frequency_hz)
@@ -421,12 +447,9 @@ def make_space(
         max(0.1, min(5.0, base.radial_angle_deg - 10.0)),
         min(89.9, max(75.0, base.radial_angle_deg + 10.0)),
     )
-    variables.extend(
-        (
-            DesignVariable("radial_length", *radial_bounds),
-            DesignVariable("radial_angle_deg", *angle_bounds),
-        )
-    )
+    variables.append(DesignVariable("radial_length", *radial_bounds))
+    if optimize_radial_angle:
+        variables.append(DesignVariable("radial_angle_deg", *angle_bounds))
     return DesignSpace(
         base,
         variables,
@@ -1146,6 +1169,24 @@ def parse_args() -> argparse.Namespace:
             "fractional bandwidth as 10 MHz at 868 MHz"
         ),
     )
+    parser.add_argument(
+        "--wire-diameter-mm",
+        "--wire-diameter",
+        type=float,
+        help=(
+            "fixed conductor diameter in mm; overrides the reference or "
+            "warm-start design"
+        ),
+    )
+    parser.add_argument(
+        "--radial-angle-deg",
+        "--radial-angle",
+        type=float,
+        help=(
+            "fixed ground-radial angle in degrees; when omitted, the angle "
+            "remains an optimizer variable"
+        ),
+    )
     budget = parser.add_mutually_exclusive_group()
     budget.add_argument("--maxiter", type=int)
     budget.add_argument(
@@ -1371,6 +1412,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--skip-convergence-check and --require-convergence conflict")
     if not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0:
         parser.error("--frequency-mhz must be finite and positive")
+    if args.wire_diameter_mm is not None and (
+        not np.isfinite(args.wire_diameter_mm) or args.wire_diameter_mm <= 0
+    ):
+        parser.error("--wire-diameter-mm must be finite and positive")
+    if args.radial_angle_deg is not None and (
+        not np.isfinite(args.radial_angle_deg)
+        or not 0 < args.radial_angle_deg < 90
+    ):
+        parser.error("--radial-angle-deg must be finite and between 0 and 90")
     args.frequency_hz = args.frequency_mhz * 1e6
     frequency_scale = REFERENCE_DESIGN_FREQUENCY_HZ / args.frequency_hz
     if args.match_bandwidth_mhz is None:
@@ -1564,6 +1614,9 @@ def build_case_schedules(
             design,
             frequency_hz,
             finetune=getattr(args, "finetune", False),
+            optimize_radial_angle=(
+                getattr(args, "radial_angle_deg", None) is None
+            ),
         )
         variable_count = len(space.variables)
         maxiter = iterations_per_run(args, variable_count, run_count)
@@ -1942,6 +1995,11 @@ def run_campaign(args: argparse.Namespace) -> None:
             "--output directory; campaign resume is not supported."
         )
     initial = load_baseline(args.warm_start, frequency_hz)
+    initial = apply_design_overrides(
+        initial,
+        wire_diameter_mm=getattr(args, "wire_diameter_mm", None),
+        radial_angle_deg=getattr(args, "radial_angle_deg", None),
+    )
     resolve_topology(args, initial)
     automatic_height = args.maximum_height_mm is None
     if automatic_height:
@@ -2079,6 +2137,17 @@ def run_campaign(args: argparse.Namespace) -> None:
             "policy": "wavelength_wire_v1",
             "wavelength_m": free_space_wavelength(frequency_hz),
             "wire_diameter_m": 2 * initial.wire_radius,
+            "wire_diameter_source": (
+                "command_line"
+                if getattr(args, "wire_diameter_mm", None) is not None
+                else "start_design"
+            ),
+            "radial_angle_deg": initial.radial_angle_deg,
+            "radial_angle_mode": (
+                "fixed_command_line"
+                if getattr(args, "radial_angle_deg", None) is not None
+                else "optimized"
+            ),
             "maximum_height_m": args.maximum_height_mm * 1e-3,
             "maximum_height_wavelengths": (
                 args.maximum_height_mm * 1e-3 / free_space_wavelength(frequency_hz)
@@ -2155,6 +2224,15 @@ def run_campaign(args: argparse.Namespace) -> None:
     print(
         "Coil/radial     : pitch 0.010-0.040 lambda, radius "
         "0.015-0.050 lambda, radials 0.15-0.40 lambda; wire floors apply"
+    )
+    print(f"Wire diameter   : {2 * initial.wire_radius * 1e3:.3f} mm")
+    print(
+        f"Radial angle    : {initial.radial_angle_deg:g} deg "
+        + (
+            "(fixed)"
+            if getattr(args, "radial_angle_deg", None) is not None
+            else "(optimized)"
+        )
     )
     print("Coil counts     : " + ", ".join(str(count) for count in args.coil_counts))
     print(
