@@ -265,9 +265,9 @@ def apply_design_overrides(
 def make_space(
     base: AntennaDesign,
     frequency_hz: float = REFERENCE_DESIGN_FREQUENCY_HZ,
-    finetune: bool = False,
+    lock_coils: bool = False,
 ) -> DesignSpace:
-    """Create wavelength-scaled bounds for broad or fine topology searches."""
+    """Create wavelength-scaled bounds with optional shared coil geometry."""
     wavelength = free_space_wavelength(frequency_hz)
     wire_diameter = 2 * base.wire_radius
 
@@ -280,7 +280,7 @@ def make_space(
 
     original_pitches = tuple(coil.pitch for coil in base.coils)
     original_radii = tuple(coil.radius for coil in base.coils)
-    if base.coils and not finetune:
+    if base.coils and lock_coils:
         shared_pitch = float(np.mean(original_pitches))
         minimum_radius = max(0.5001 * coil.transition_offset for coil in base.coils)
         shared_radius = max(float(np.mean(original_radii)), minimum_radius)
@@ -324,7 +324,7 @@ def make_space(
         DesignVariable(f"straight_lengths.{index}", lower, upper)
         for index, (lower, upper) in enumerate(straight_bounds)
     ]
-    if base.coils and not finetune:
+    if base.coils and lock_coils:
         minimum_pitch = max(
             COIL_PITCH_RANGE_LAMBDA[0] * wavelength,
             MINIMUM_PITCH_WIRE_DIAMETERS * wire_diameter,
@@ -1220,12 +1220,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--lock-coils",
+        action="store_true",
+        help="use one shared pitch and radius across all loading coils",
+    )
+    parser.add_argument(
         "--finetune",
         "--fine-tune",
         action="store_true",
         help=(
-            "optimize every coil pitch and radius independently; broad "
-            "searches share one pitch and radius across all coils"
+            "use multiscale populations, restarts, and a bounded local search "
+            "around the starting design"
         ),
     )
     parser.add_argument(
@@ -1646,7 +1651,7 @@ def build_case_schedules(
         space = make_space(
             design,
             frequency_hz,
-            finetune=getattr(args, "finetune", False),
+            lock_coils=getattr(args, "lock_coils", False),
         )
         variable_count = len(space.variables)
         maxiter = iterations_per_run(args, variable_count, run_count)
@@ -2009,6 +2014,7 @@ def run_finetune_optimizer(
 def run_campaign(args: argparse.Namespace) -> None:
     frequency_hz = args.frequency_hz
     args.finetune = bool(getattr(args, "finetune", False))
+    args.lock_coils = bool(getattr(args, "lock_coils", False))
     if getattr(args, "seeds", None) is None:
         args.seeds = (2, 3) if args.finetune else (2, 3, 4, 5)
     args.s11_margin_target_db = float(
@@ -2086,7 +2092,9 @@ def run_campaign(args: argparse.Namespace) -> None:
         },
         "coil_counts": list(args.coil_counts),
         "turn_cases": [list(turn_case) for turn_case in args.turn_cases],
-        "coil_parameterization": ("independent" if args.finetune else "shared"),
+        "coil_parameterization": (
+            "shared" if args.lock_coils else "independent"
+        ),
         "optimizer": (
             {
                 "mode": "finetune_multiscale",
@@ -2270,9 +2278,9 @@ def run_campaign(args: argparse.Namespace) -> None:
     print(
         "Coil geometry   : "
         + (
-            "independent pitch/radius (--finetune)"
-            if args.finetune
-            else "shared pitch/radius (broad search)"
+            "shared pitch/radius (--lock-coils)"
+            if args.lock_coils
+            else "independent pitch/radius"
         )
     )
     if args.finetune:

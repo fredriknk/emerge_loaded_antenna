@@ -22,6 +22,7 @@ from emerge_loaded_antenna import (
     load_reference_design,
     simulate,
 )
+from emerge_loaded_antenna.drawing import export_drawing
 
 MHz = 1e6
 mm = 1e-3
@@ -31,20 +32,27 @@ F0 = 869.5*MHz
 # Tracked example geometry evaluated at this script's target frequency.
 DESIGN = load_reference_design(F0)
 
+trans = 1*mm
 DESIGN = replace(
     DESIGN,
-    wire_radius=0.0008,
+    wire_radius=0.8*mm,
+    radial_length=100*mm,
+    straight_lengths=np.array([96, 75, 112])*mm,
+    coils=(replace(DESIGN.coils[0], transition=trans),
+           replace(DESIGN.coils[1], transition=trans),
+    )
 )
+print(DESIGN)
 
-RUN_SOLVER = False
-SHOW_GEOMETRY = False
+RUN_SOLVER = True
+SHOW_GEOMETRY = True
 SHOW_COIL_PREVIEW = False
-SHOW_MESH = True
+SHOW_MESH = False
 SHOW_3D_FARFIELD = False
 FARFIELD_DB_FLOOR = -30.0
 
 OPTIONS = SimulationOptions(
-    sweep=FrequencySweep(center=F0, span=50*MHz, points=11),
+    sweep=FrequencySweep(center=F0, span=50*MHz, points=5),
     mesh=MeshSettings(
         wire_sections=6,
         antenna_size_factor=3.0,
@@ -230,12 +238,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     result = simulate(DESIGN, replace(OPTIONS, solver=args.solver))
+    export_drawing(
+        DESIGN,
+        "my_manual_antenna.pdf",
+        result=result if result.solved else None,
+        title=f"{F0/MHz:g} MHz Prototype",
+    )
     if not result.solved:
         print("Done (mesh only).")
         return
     report_s11(result)
     report_farfield(result)
     print("Done.")
+
 
 
 if __name__ == "__main__":

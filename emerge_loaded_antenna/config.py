@@ -24,30 +24,51 @@ SOLVER_CHOICES = (
 OPEN_REGION_MODES = ("pml", "abc")
 ABC_TYPES = ("A", "B", "C", "D", "E")
 
+TRANSITION_OFFSET_RATIO = 19.0/24.0
+MINIMUM_TRANSITION_WIRE_RADIUS_RATIO = 5.0/4.0
+
 
 @dataclass(frozen=True)
 class CoilDesign:
-    """Geometry of one helical loading coil."""
+    """Geometry of one helical loading coil.
+
+    ``transition_offset`` is derived from ``transition`` using the fixed
+    :data:`TRANSITION_OFFSET_RATIO`.  The constructor argument remains
+    available so older Python calls and saved JSON designs still load, but an
+    independently supplied value is normalized to the derived value.
+    """
 
     radius: float = 10e-3
     turns: int = 1
     pitch: float = 7e-3
     transition: float = 6e-3
-    transition_offset: float = 4.75e-3
+    transition_offset: float | None = None
     handedness: str = "RH"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "transition_offset",
+            self.transition*TRANSITION_OFFSET_RATIO,
+        )
+
     def validate(self) -> None:
-        if self.radius <= 0:
-            raise ValueError("coil radius must be positive")
+        if not math.isfinite(self.radius) or self.radius <= 0:
+            raise ValueError("coil radius must be finite and positive")
         if isinstance(self.turns, bool) or int(self.turns) != self.turns:
             raise ValueError("coil turns must be an integer")
         if self.turns <= 0:
             raise ValueError("coil turns must be positive")
-        if self.pitch <= 0 or self.transition <= 0:
-            raise ValueError("coil pitch and transition must be positive")
+        if (
+            not math.isfinite(self.pitch)
+            or not math.isfinite(self.transition)
+            or self.pitch <= 0
+            or self.transition <= 0
+        ):
+            raise ValueError("coil pitch and transition must be finite and positive")
         if not 0 < self.transition_offset < 2*self.radius:
             raise ValueError(
-                "coil transition_offset must be between zero and the diameter"
+                "derived coil transition_offset must be between zero and the diameter"
             )
         if self.handedness.upper() not in {"RH", "LH"}:
             raise ValueError("coil handedness must be 'RH' or 'LH'")
@@ -110,6 +131,19 @@ class AntennaDesign:
             if not isinstance(coil, CoilDesign):
                 raise ValueError(f"coils[{index}] must be a CoilDesign")
             coil.validate()
+            minimum_transition = (
+                MINIMUM_TRANSITION_WIRE_RADIUS_RATIO*self.wire_radius
+            )
+            if coil.transition < minimum_transition and not math.isclose(
+                coil.transition,
+                minimum_transition,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            ):
+                raise ValueError(
+                    f"coils[{index}].transition must be at least 1.25 times "
+                    "wire_radius"
+                )
 
 
 @dataclass(frozen=True)

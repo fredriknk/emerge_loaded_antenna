@@ -28,6 +28,7 @@ Command-line options use MHz, millimetres, and degrees where stated.
   - [Design objects](#design-objects)
   - [Create and edit designs](#create-and-edit-designs)
   - [Save, load, and scale designs](#save-load-and-scale-designs)
+  - [Fabrication drawings](#fabrication-drawings)
 - [Simulation](#simulation)
   - [Run a simulation](#run-a-simulation)
   - [Simulation configuration](#simulation-configuration)
@@ -37,7 +38,7 @@ Command-line options use MHz, millimetres, and degrees where stated.
   - [First optimization campaign](#first-optimization-campaign)
   - [Starting design and wire diameter](#starting-design-and-wire-diameter)
   - [Topology selection](#topology-selection)
-  - [Broad search and fine tuning](#broad-search-and-fine-tuning)
+  - [Coil parameterization and fine tuning](#coil-parameterization-and-fine-tuning)
   - [Pattern, lobe, and beamwidth goals](#pattern-lobe-and-beamwidth-goals)
   - [Matching and physical constraints](#matching-and-physical-constraints)
   - [Budgets, seeds, restarts, and confirmation](#budgets-seeds-restarts-and-confirmation)
@@ -63,7 +64,9 @@ Command-line options use MHz, millimetres, and degrees where stated.
 - S11, global peak gain, requested-direction gain, horizon statistics, ripple,
   null depth, peak direction, and directional half-power beamwidth.
 - Wavelength-scaled reference designs for frequencies other than 868 MHz.
-- Multi-topology, multi-seed optimization campaigns with broad and fine modes.
+- Multi-topology, multi-seed optimization campaigns with global and fine modes.
+- Dimensioned PDF, SVG, or PNG fabrication sheets with optional S11 and
+  horizon-pattern plots.
 - Broadband matching penalties, height limits, horizon or directional pattern
   goals, optional beamwidth targeting, and repeat confirmation of incumbents.
 - Atomic progress artifacts, CSV evaluation logs, topology rankings, and JSON
@@ -143,11 +146,12 @@ old and a new campaign from being mistaken for one run.
    diameter, and whether beamwidth is a real requirement.
 2. **Inspect a starting model.** Use `main.py` or a small library script to view
    the geometry and confirm units, coil order, radial angle, and port position.
-3. **Run a broad campaign.** Compare likely coil counts or explicit turn cases.
-   Broad mode shares coil pitch and radius to keep the search dimension small.
+3. **Run a global campaign.** Compare likely coil counts or explicit turn cases.
+   Coil pitch and radius are independent by default; use `--lock-coils` for a
+   deliberately smaller shared-coil search.
 4. **Fine-tune the winner.** Warm-start from `campaign_best.json` and use
-   `--finetune`. Fine mode releases each coil's pitch and radius and adds local
-   refinement around good candidates.
+   `--finetune` to add multiscale populations, restarts, and local refinement.
+   Coil sharing is controlled separately by `--lock-coils`.
 5. **Verify independently.** Run `verify_best.py` for a denser frequency sweep,
    finer mesh, and finer angular sampling.
 6. **Test numerical convergence on the actual winner.** Run
@@ -194,6 +198,11 @@ of at most 120 degrees. These pieces form one continuous OpenCASCADE wire,
 which is swept once with a circular conductor cross-section. Local transitions
 avoid the distant-shape distortion that a single global spline can introduce.
 
+The transition chord offset is derived automatically as
+`transition * 19 / 24`. It is not an independent design parameter. A transition
+must be at least `1.25 * wire_radius`, and its derived offset must remain below
+the coil diameter.
+
 Each coil has an integer number of turns and returns to the radiator axis.
 `radius` is measured to the wire centerline, so the approximate physical coil
 outside diameter is:
@@ -229,7 +238,7 @@ with `--target-theta` and `--target-phi`.
 | `turns` | `1` | Positive integer turns. |
 | `pitch` | `7e-3` m | Axial advance per turn. |
 | `transition` | `6e-3` m | Axial room assigned to each smooth transition. |
-| `transition_offset` | `4.75e-3` m | Transition chord offset; between zero and coil diameter. |
+| `transition_offset` | derived | Always normalized to `transition * 19 / 24`; retained in JSON for compatibility. |
 | `handedness` | `"RH"` | `"RH"` or `"LH"`. |
 
 Configuration dataclasses are frozen. This makes designs safe to reuse across
@@ -292,6 +301,39 @@ scaled = scale_design(restored, factor=915e6 / 433e6)
 result containing a top-level `design` object. Wavelength scaling changes
 physical lengths, including wire radius, while retaining angles, counts,
 handedness, and impedance.
+
+### Fabrication drawings
+
+Generate a dimensioned A4 landscape sheet from a raw design or optimizer result:
+
+```powershell
+.\.venv\Scripts\python.exe -m emerge_loaded_antenna.drawing `
+    optimization_results\868mhz_horizon\campaign_best.json `
+    antenna.pdf `
+    --title "868 MHz Prototype"
+```
+
+PDF, SVG, and PNG output are supported. The sheet contains X-Z, Y-Z, and X-Y
+orthographic views, radiator and coil dimensions, radial geometry, and a
+fabrication table. The command-line exporter has no live solver result, so its
+RF panels are labeled as unavailable.
+
+Pass a solved `SimulationResult` through the Python API to include the complete
+S11 sweep and XY/horizon realized-gain lobe:
+
+```python
+from emerge_loaded_antenna.drawing import export_drawing
+
+export_drawing(
+    design,
+    "antenna.pdf",
+    result=result,
+    title="868 MHz Prototype",
+)
+```
+
+Drawing export requires Matplotlib. Install only that optional feature with
+`pip install -e ".[drawing]"`; it is also installed by the `verify` extra.
 
 ## Simulation
 
@@ -388,8 +430,9 @@ at that requested direction, not necessarily 3 dB below the global peak.
 ```
 
 The physical design and viewer switches are intentionally defined in the file
-so it can serve as a compact experiment script. Closing an EMerge/Gmsh viewer
-continues execution.
+so it can serve as a compact experiment script. It also exports
+`my_manual_antenna.pdf`, including S11 and the horizon lobe when a solve was
+performed. Closing an EMerge/Gmsh viewer continues execution.
 
 ## Campaign optimizer
 
@@ -477,34 +520,47 @@ When topology differs from the starting design, a wavelength-based seed is
 generated for that case. Existing valid dimensions are retained where the
 topology permits it.
 
-### Broad search and fine tuning
+### Coil parameterization and fine tuning
 
-Broad mode shares coil pitch and coil radius across all coils. It searches:
+By default, the optimizer searches every straight length, every coil pitch,
+every coil radius, radial length, and ground-radial angle independently. A
+loaded design with `N` coils therefore has `3N + 3` continuous variables; an
+unloaded radiator has three.
 
-- every straight-section length independently;
-- radial length and ground-radial angle;
-- shared coil pitch and shared coil radius for loaded topologies.
+Use `--lock-coils` when every coil should share one pitch and one radius. This
+reduces an N-coil design to `N + 5` variables:
 
-This gives `N + 5` variables for `N` coils and three variables for an unloaded
-radiator. Sharing coil geometry reduces the search dimension and is usually
-the best first pass.
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --coil-counts 1,2,3 `
+    --lock-coils `
+    --hours 8
+```
 
-`--finetune` (alias `--fine-tune`) releases every coil pitch and radius. It
-therefore searches `3N + 3` variables and is designed to warm-start from a good
-broad-search winner. Fine mode also uses a mixed initial population:
+Locking is independent of optimizer mode. It can make an initial global search
+cheaper, but it also excludes antennas whose coils need different dimensions.
+The result metadata records `coil_parameterization` as `independent` or
+`shared`.
+
+`--finetune` (alias `--fine-tune`) changes the search strategy, not coil
+coupling. It uses a good warm start, mixed local/global populations,
+deterministic restarts, and bounded coordinate search. Unless `--lock-coils` is
+also present, all coil pitches and radii remain independent. Its initial
+population contains:
 
 - 50% near the warm start, within 3% of normalized range by default;
 - 30% within a wider 10% neighborhood;
 - 20% across the global bounds.
 
-It adds deterministic restarts after stagnation and a bounded pattern search
-around elite candidates. Fine mode's mutation, recombination, neighborhood
-radii, restart threshold, and local-search budget are configurable.
+Fine mode's mutation, recombination, neighborhood radii, restart threshold, and
+local-search budget are configurable. If a global campaign used
+`--lock-coils`, omit that flag from the fine-tuning command to release the coil
+dimensions.
 
-The normal broad bounds are wavelength-based and then enlarged when needed to
+The normal search bounds are wavelength-based and then enlarged when needed to
 contain a valid warm start:
 
-| Quantity | Broad range |
+| Quantity | Normal range |
 |---|---:|
 | Loaded straight length | 0.15 to 0.72 wavelength |
 | Unloaded straight length | 0.18 to 0.70 wavelength |
@@ -684,8 +740,9 @@ Campaign and topology:
 | `--coil-count` | inherited | One fixed coil count. |
 | `--coil-counts` | inherited | Comma-separated one-turn topologies. |
 | `--turn-cases` | inherited | Explicit cases such as `none,1,1x2`. |
+| `--lock-coils` | off | Share one pitch and radius across all coils. |
 | `--warm-start` | reference | Raw design or optimizer-result JSON. |
-| `--finetune`, `--fine-tune` | off | Independent coil dimensions and local refinement. |
+| `--finetune`, `--fine-tune` | off | Multiscale populations, restarts, and local refinement. |
 | `--output` | timestamped directory | New campaign output directory. |
 | `--report-every` | `10` | Console reporting interval in candidate calls. |
 
@@ -874,7 +931,7 @@ Optimization cost is dominated by full-wave solves. Before committing to a
 long run:
 
 - time several representative evaluations and set `--seconds-per-eval`;
-- use broad mode before fine mode;
+- use global mode before fine mode;
 - compare only plausible topology cases;
 - keep the optimizer mesh fixed within one campaign;
 - use multiple seeds rather than trusting one stochastic run;
@@ -944,6 +1001,7 @@ cannot be resumed.
 emerge_loaded_antenna/
   config.py          physical and numerical configuration
   geometry.py        continuous radiator centerline construction
+  drawing.py         fabrication dimensions and PDF/SVG/PNG export
   simulation.py      EMerge model, solve, and far-field metrics
   optimize.py        reusable design spaces and objectives
   presets.py         tracked reference design and scaling
@@ -965,8 +1023,8 @@ Run the checks from the repository root:
 ```
 
 The test suite mocks expensive EMerge paths where appropriate and also tests
-geometry invariants, serialization, campaign scheduling, objective accounting,
-beamwidth measurement, CLI validation, and convergence certificates.
+geometry and drawing invariants, serialization, campaign scheduling, objective
+accounting, beamwidth measurement, CLI validation, and convergence certificates.
 
 ## Modeling scope
 
