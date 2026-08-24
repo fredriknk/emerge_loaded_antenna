@@ -64,6 +64,76 @@ def pattern_target_from_payload(payload: object) -> dict | None:
     }
 
 
+def verification_quality(
+    verification: dict,
+    source_payload: object,
+    *,
+    convergence_tolerance_db: float = 0.5,
+) -> dict:
+    """Assess fine-mesh matching and coarse/fine numerical agreement."""
+    objective = {}
+    simulation_metadata = None
+    if isinstance(source_payload, dict):
+        simulation = source_payload.get("simulation", {})
+        if isinstance(simulation, dict):
+            simulation_metadata = simulation
+            candidate = simulation.get("objective", {})
+            if isinstance(candidate, dict):
+                objective = candidate
+    s11_limit_db = float(objective.get("maximum_s11_db", -10.0))
+    fine = verification["fine"]
+    worst_s11_db = float(fine["worst_s11_db"])
+    checks: dict[str, dict] = {
+        "fine_worst_s11": {
+            "passed": worst_s11_db <= s11_limit_db,
+            "observed_db": worst_s11_db,
+            "maximum_db": s11_limit_db,
+        }
+    }
+    if simulation_metadata is not None:
+        preflight_status = simulation_metadata.get("convergence_status")
+        if preflight_status is not None:
+            checks["open_region_preflight"] = {
+                "passed": preflight_status == "passed",
+                "status": preflight_status,
+                "warning": simulation_metadata.get("convergence_warning"),
+            }
+    convergence = verification.get("convergence")
+    if isinstance(convergence, dict) and convergence:
+        largest_delta = max(abs(float(value)) for value in convergence.values())
+        checks["coarse_fine_agreement"] = {
+            "passed": largest_delta <= convergence_tolerance_db,
+            "largest_absolute_delta_db": largest_delta,
+            "maximum_absolute_delta_db": convergence_tolerance_db,
+        }
+
+    observations = {}
+    if "target_beamwidth_deg" in fine:
+        target = float(fine["target_beamwidth_deg"])
+        if "ring_beamwidth_deg" in fine:
+            observations["beamwidth"] = {
+                "target_deg": target,
+                "ring_deg": float(fine["ring_beamwidth_deg"]),
+                "error_deg": float(fine["ring_beamwidth_deg"])-target,
+            }
+        elif "elevation_beamwidth_deg" in fine:
+            observations["beamwidth"] = {
+                "target_deg": target,
+                "elevation_deg": float(fine["elevation_beamwidth_deg"]),
+                "azimuth_deg": float(fine["azimuth_beamwidth_deg"]),
+            }
+    passed = all(check["passed"] for check in checks.values())
+    return {
+        "status": "passed" if passed else "warning",
+        "checks": checks,
+        "observations": observations,
+        "note": (
+            "Beamwidth is a soft optimization goal and is reported, not used "
+            "as a pass/fail threshold."
+        ),
+    }
+
+
 def result_summary(
     result: SimulationResult,
     frequency_hz: float,
@@ -206,12 +276,19 @@ def save_plots(
     result: SimulationResult,
     output: Path,
     frequency_hz: float,
+    pattern_target: dict | None = None,
+    maximum_s11_db: float = -10.0,
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
     frequency_mhz = result.frequencies/1e6
     fig, axis = plt.subplots(figsize=(8, 4.5))
     axis.plot(frequency_mhz, result.s11_db, marker="o")
-    axis.axhline(-10.0, color="tab:red", linestyle="--", label="-10 dB limit")
+    axis.axhline(
+        maximum_s11_db,
+        color="tab:red",
+        linestyle="--",
+        label=f"{maximum_s11_db:g} dB limit",
+    )
     axis.axvline(frequency_hz/1e6, color="0.5", linestyle=":")
     axis.set(xlabel="Frequency (MHz)", ylabel="S11 (dB)", title="Verified S11")
     axis.grid(True, alpha=0.35)
@@ -235,6 +312,23 @@ def save_plots(
     polar.tight_layout()
     polar.savefig(output/"horizon_gain.png", dpi=180)
     plt.close(polar)
+
+    if pattern_target is not None and pattern_target["mode"] == "ring":
+        target_theta = np.deg2rad(pattern_target["theta_deg"])
+        target_index = int(np.argmin(np.abs(theta[0, :] - target_theta)))
+        target_phi = phi[:-1, target_index]
+        target_gain = values[:-1, target_index]
+        polar = plt.figure(figsize=(7, 7))
+        axis = polar.add_subplot(111, projection="polar")
+        axis.plot(target_phi, target_gain)
+        axis.set_title(
+            "Verified target-ring realized gain at theta "
+            f"{np.rad2deg(theta[0, target_index]):g} degrees (dBi)"
+        )
+        axis.grid(True, alpha=0.35)
+        polar.tight_layout()
+        polar.savefig(output/"target_ring_gain.png", dpi=180)
+        plt.close(polar)
 
     field = result.raw_data.field.find(freq=frequency_hz)
     faces = result.artifacts.farfield_selection
@@ -433,6 +527,7 @@ def main() -> None:
     args = parse_args()
     source_frequency = None
     pattern_target = None
+    source_payload = None
     if args.result is not None:
         source_payload = json.loads(args.result.read_text(encoding="utf-8"))
         if isinstance(source_payload, dict):
@@ -541,6 +636,23 @@ def main() -> None:
         if max(abs(value) for value in convergence.values()) > 0.5:
             print("WARNING: result changes by more than 0.5 dB; refine again.")
 
+    payload["quality"] = verification_quality(payload, source_payload)
+    quality_status = payload["quality"]["status"]
+    print(f"\nVERIFICATION QUALITY: {quality_status.upper()}")
+    for name, check in payload["quality"]["checks"].items():
+        print(f"  {name}: {'PASS' if check['passed'] else 'WARNING'}")
+
+    report_path = args.output/"verification.json"
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    save_plots(
+        fine_result,
+        args.output,
+        frequency_hz,
+        pattern_target,
+        maximum_s11_db=float(
+            payload["quality"]["checks"]["fine_worst_s11"]["maximum_db"]
+        ),
+    )
     artifacts = export_fabrication_artifacts(
         design,
         fine_result,
@@ -551,10 +663,7 @@ def main() -> None:
     )
     if artifacts:
         payload["artifacts"] = artifacts
-
-    report_path = args.output/"verification.json"
-    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    save_plots(fine_result, args.output, frequency_hz)
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\nVerification report: {report_path.resolve()}")
     print(f"Plots              : {args.output.resolve()}")
     if args.show_3d:

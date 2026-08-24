@@ -11,6 +11,7 @@ from examples.verify_best import (
     options,
     parse_args,
     pattern_target_from_payload,
+    verification_quality,
 )
 
 
@@ -67,6 +68,46 @@ class VerifyBestTests(unittest.TestCase):
                 "beamwidth_deg": 50.0,
             },
         )
+
+    def test_verification_quality_checks_matching_and_mesh_agreement(self):
+        quality = verification_quality(
+            {
+                "fine": {
+                    "worst_s11_db": -9.5,
+                    "target_beamwidth_deg": 50.0,
+                    "ring_beamwidth_deg": 53.0,
+                },
+                "convergence": {
+                    "peak_gain_delta_db": 0.2,
+                    "s11_target_delta_db": 0.7,
+                },
+            },
+            {
+                "simulation": {
+                    "objective": {"maximum_s11_db": -10.0}
+                }
+            },
+        )
+
+        self.assertEqual(quality["status"], "warning")
+        self.assertFalse(quality["checks"]["fine_worst_s11"]["passed"])
+        self.assertFalse(quality["checks"]["coarse_fine_agreement"]["passed"])
+        self.assertEqual(quality["observations"]["beamwidth"]["error_deg"], 3.0)
+
+    def test_verification_quality_warns_for_uncertified_open_region(self):
+        quality = verification_quality(
+            {"fine": {"worst_s11_db": -12.0}},
+            {
+                "simulation": {
+                    "convergence_status": "warning",
+                    "convergence_warning": "certificate did not pass",
+                    "objective": {"maximum_s11_db": -10.0},
+                }
+            },
+        )
+
+        self.assertEqual(quality["status"], "warning")
+        self.assertFalse(quality["checks"]["open_region_preflight"]["passed"])
 
     def test_fabrication_flags_are_parsed(self):
         with patch(

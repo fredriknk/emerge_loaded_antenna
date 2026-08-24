@@ -15,6 +15,8 @@ from emerge_loaded_antenna import (
     REFERENCE_DESIGN_FREQUENCY_HZ,
     AntennaDesign,
     CoilDesign,
+    DesignSpace,
+    DesignVariable,
     EvaluationRecord,
     MeshSettings,
     OpenRegionSettings,
@@ -26,12 +28,16 @@ from examples.optimize_gain import (
     COLLINEAR_SECTION_RANGE_LAMBDA,
     COLLINEAR_SECTION_START_LAMBDA,
     MONOPOLE_LENGTH_RANGE_LAMBDA,
+    CampaignOutcome,
     CampaignProgress,
     CaseSchedule,
+    CoordinatePolishStats,
     GenerationMonitor,
+    _automatic_budget_model,
     apply_design_overrides,
     build_case_schedules,
     build_finetune_population,
+    coordinate_polish,
     default_maximum_height,
     design_for_coil_count,
     ensure_convergence_certificate,
@@ -44,13 +50,188 @@ from examples.optimize_gain import (
     parse_turn_cases,
     resolve_topology,
     restart_seed,
+    run_automatic_pipeline,
+    run_automatic_verification,
     run_campaign,
     run_finetune_optimizer,
+    select_automatic_winner,
     split_finetune_budget,
 )
 
 
 class CampaignTests(unittest.TestCase):
+    def test_automatic_polish_reserve_covers_smallest_topology_population(self):
+        with patch(
+            "sys.argv",
+            [
+                "optimize_gain.py",
+                "--automatic",
+                "--coil-counts",
+                "0,3",
+                "--polish-evaluations",
+                "100",
+            ],
+        ):
+            args = parse_args()
+
+        model = _automatic_budget_model(args)
+        zero_coil_space = make_space(
+            design_for_coil_count(AntennaDesign(), 0),
+            args.frequency_hz,
+        )
+        zero_coil_population = args.popsize*len(zero_coil_space.variables)
+
+        self.assertEqual(
+            model.fine_required_batches,
+            1 + int(np.ceil(100/zero_coil_population)),
+        )
+
+    def test_automatic_winner_does_not_regress_confirmed_rough_design(self):
+        rough = {"feasible": True, "objective": -5.0, "design": "rough"}
+        noisy_fine = {"feasible": True, "objective": -4.0, "design": "fine"}
+
+        stage, payload = select_automatic_winner(rough, noisy_fine)
+
+        self.assertEqual(stage, "rough")
+        self.assertIs(payload, rough)
+
+    def test_coordinate_polish_converges_one_parameter_at_a_time(self):
+        space = DesignSpace(
+            AntennaDesign(radial_length=0.5),
+            (DesignVariable("radial_length", 0.0, 1.0),),
+        )
+
+        class QuadraticObjective:
+            def __init__(self):
+                self.history = []
+                self.simulation_evaluations = 0
+                self.seen = []
+                self((0.5,))
+
+            @property
+            def best_record(self):
+                return min(self.history, key=lambda record: record.score)
+
+            def __call__(self, vector):
+                values = tuple(float(value) for value in vector)
+                self.seen.append(values)
+                score = (values[0] - 0.73) ** 2
+                record = EvaluationRecord(
+                    values,
+                    score,
+                    -12.0,
+                    2.0,
+                    metrics={"worst_s11_db": -12.0},
+                )
+                self.history.append(record)
+                self.simulation_evaluations += 1
+                return score
+
+        objective = QuadraticObjective()
+        stats = coordinate_polish(
+            objective,
+            space,
+            -10.0,
+            100,
+            initial_step=0.2,
+            minimum_step=0.0125,
+            minimum_improvement=0.0,
+        )
+
+        self.assertTrue(stats.converged)
+        self.assertLess(stats.evaluations, 100)
+        self.assertGreater(stats.improvements, 0)
+        self.assertLessEqual(abs(objective.best_record.vector[0] - 0.73), 0.0125)
+
+    def test_coordinate_polish_prefers_feasibility_over_raw_score(self):
+        space = DesignSpace(
+            AntennaDesign(radial_length=0.5),
+            (DesignVariable("radial_length", 0.0, 1.0),),
+        )
+
+        class FeasibilityObjective:
+            def __init__(self):
+                self.history = []
+                self.seen = []
+                self((0.5,))
+
+            @property
+            def best_record(self):
+                return self.history[0]
+
+            def __call__(self, vector):
+                value = float(vector[0])
+                self.seen.append(value)
+                feasible = value > 0.5
+                record = EvaluationRecord(
+                    (value,),
+                    100.0 if feasible else -100.0,
+                    -12.0 if feasible else -5.0,
+                    2.0,
+                    metrics={"worst_s11_db": -12.0 if feasible else -5.0},
+                )
+                self.history.append(record)
+                return record.score
+
+        objective = FeasibilityObjective()
+        stats = coordinate_polish(
+            objective,
+            space,
+            -10.0,
+            3,
+            initial_step=0.2,
+            minimum_step=0.1,
+        )
+
+        self.assertEqual(stats.evaluations, 3)
+        self.assertEqual(stats.improvements, 1)
+        self.assertAlmostEqual(objective.seen[-1], 0.9)
+
+    def test_coordinate_polish_rejects_quarantined_candidate(self):
+        space = DesignSpace(
+            AntennaDesign(radial_length=0.5),
+            (DesignVariable("radial_length", 0.0, 1.0),),
+        )
+
+        class ConfirmationObjective:
+            def __init__(self):
+                self.history = []
+                self.seen = []
+                self((0.5,))
+
+            @property
+            def best_record(self):
+                return self.history[0]
+
+            def __call__(self, vector):
+                value = float(vector[0])
+                self.seen.append(value)
+                score = -100.0 if value > 0.5 else -1.0 if value < 0.5 else 0.0
+                record = EvaluationRecord(
+                    (value,),
+                    score,
+                    -12.0,
+                    2.0,
+                    metrics={"worst_s11_db": -12.0},
+                    confirmation_status=(
+                        "quarantined" if value > 0.5 else "not_requested"
+                    ),
+                )
+                self.history.append(record)
+                return record.score
+
+        objective = ConfirmationObjective()
+        coordinate_polish(
+            objective,
+            space,
+            -10.0,
+            3,
+            initial_step=0.2,
+            minimum_step=0.1,
+        )
+
+        self.assertAlmostEqual(objective.seen[-1], 0.5)
+
     def test_target_theta_alone_selects_omnidirectional_ring_mode(self):
         with patch(
             "sys.argv",
@@ -167,6 +348,16 @@ class CampaignTests(unittest.TestCase):
         ):
             parse_args()
 
+        for conflicting in (
+            ["--polish", "--scipy-polish"],
+            ["--finetune", "--scipy-polish"],
+        ):
+            with (
+                patch("sys.argv", ["optimize_gain.py", *conflicting]),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args()
+
     def test_design_override_converts_diameter_and_leaves_input_unchanged(self):
         original = AntennaDesign(wire_radius=0.7e-3, radial_angle_deg=60.0)
 
@@ -194,6 +385,276 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(fine.s11_margin_target_db, -12.0)
         self.assertEqual(fine.s11_margin_weight, 0.10)
         self.assertEqual(fine.restart_min_improvement, 0.05)
+        self.assertFalse(broad.automatic)
+        self.assertFalse(broad.polish)
+        self.assertFalse(broad.scipy_polish)
+
+    def test_automatic_cli_preserves_broad_seed_defaults(self):
+        with patch("sys.argv", ["optimize_gain.py", "--automatic"]):
+            args = parse_args()
+
+        self.assertTrue(args.automatic)
+        self.assertFalse(args.seeds_explicit)
+        self.assertEqual(args.seeds, (2, 3, 4, 5))
+
+        with (
+            patch(
+                "sys.argv",
+                ["optimize_gain.py", "--automatic", "--scipy-polish"],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
+    def test_automatic_pipeline_runs_rough_then_fine_polish_then_verify(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "automatic"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--automatic",
+                    "--maxiter",
+                    "20",
+                    "--coil-counts",
+                    "1,2",
+                    "--skip-convergence-check",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+
+            stage_args = []
+
+            def fake_campaign(stage):
+                stage_args.append(stage)
+                if not stage.finetune and stage.maximum_height_mm is None:
+                    stage.maximum_height_mm = 432.1
+                stage.output.mkdir(parents=True, exist_ok=True)
+                best = stage.output / "campaign_best.json"
+                best.write_text(
+                    json.dumps(
+                        {
+                            "frequency_hz": stage.frequency_hz,
+                            "turn_case": [1, 1],
+                            "coil_count": 2,
+                            "design": {"coils": [{}, {}]},
+                            "simulation": {
+                                "objective": {"pattern_mode": "horizon"}
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                if stage.finetune:
+                    (stage.output / "run_summaries.json").write_text(
+                        json.dumps(
+                            {
+                                "runs": [
+                                    {
+                                        "optimizer": {
+                                            "transition_reason": "fine_stagnation",
+                                            "coordinate_polish": {
+                                                "evaluations": 12,
+                                                "converged": True,
+                                            },
+                                        }
+                                    }
+                                ]
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    (stage.output / "evaluations.csv").write_text(
+                        "candidate\n1\n",
+                        encoding="utf-8",
+                    )
+                return CampaignOutcome(best, False)
+
+            artifacts = (output / "verification.json", output / "design_sheet.pdf")
+
+            def fake_verification(_args, _best):
+                (output / "verification.json").write_text(
+                    json.dumps({"quality": {"status": "passed", "checks": {}}}),
+                    encoding="utf-8",
+                )
+                return artifacts
+
+            with (
+                patch(
+                    "examples.optimize_gain.run_campaign",
+                    side_effect=fake_campaign,
+                ),
+                patch(
+                    "examples.optimize_gain.run_automatic_verification",
+                    side_effect=fake_verification,
+                ) as verify,
+            ):
+                final_best = run_automatic_pipeline(args)
+
+            self.assertEqual(len(stage_args), 2)
+            rough, fine = stage_args
+            self.assertFalse(rough.finetune)
+            self.assertEqual(rough.pipeline_stage, "rough")
+            self.assertEqual(rough.seeds, (2, 3, 4, 5))
+            self.assertTrue(fine.finetune)
+            self.assertTrue(fine.polish)
+            self.assertEqual(fine.pipeline_stage, "fine_polish")
+            self.assertEqual(fine.turn_cases, ((1, 1),))
+            self.assertEqual(fine.seeds, (2, 3))
+            self.assertEqual(fine.maximum_height_mm, 432.1)
+            self.assertEqual(
+                fine.maximum_height_source_override,
+                "automatic_campaign_shared",
+            )
+            self.assertGreater(fine.maxiter, 10)
+            self.assertEqual(final_best, output / "campaign_best.json")
+            verify.assert_called_once_with(args, final_best)
+            manifest = json.loads(
+                (output / "automatic_pipeline.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "complete")
+            self.assertAlmostEqual(
+                manifest["budget"]["estimated_rough_candidate_fraction"],
+                0.65,
+                delta=0.03,
+            )
+            self.assertGreater(
+                manifest["budget"]["fine_polish"]["rolled_forward_candidates"],
+                0,
+            )
+
+        with TemporaryDirectory() as temporary:
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--automatic",
+                    "--maxiter",
+                    "0",
+                    "--output",
+                    str(Path(temporary) / "too_small"),
+                ],
+            ):
+                too_small = parse_args()
+            with self.assertRaisesRegex(ValueError, "coordinate polish"):
+                run_automatic_pipeline(too_small)
+
+    def test_automatic_pipeline_records_stage_interrupt(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "automatic"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--automatic",
+                    "--maxiter",
+                    "3",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+
+            with (
+                patch(
+                    "examples.optimize_gain.run_campaign",
+                    side_effect=KeyboardInterrupt,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                run_automatic_pipeline(args)
+
+            manifest = json.loads(
+                (output / "automatic_pipeline.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "interrupted")
+            self.assertEqual(manifest["stages"]["rough"]["status"], "interrupted")
+
+    def test_automatic_verification_uses_same_output_and_fabrication_flags(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            best = output / "campaign_best.json"
+            best.write_text(
+                json.dumps(
+                    {
+                        "coil_count": 0,
+                        "design": {"coils": []},
+                        "simulation": {
+                            "objective": {"pattern_mode": "horizon"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for name in (
+                "verification.json",
+                "s11_verified.png",
+                "horizon_gain.png",
+                "principal_plane_gain.png",
+                "design_sheet.pdf",
+            ):
+                (output / name).write_bytes(b"artifact")
+            args = Namespace(
+                output=output,
+                match_bandwidth_mhz=20.0,
+                solver="cudss",
+            )
+            with patch(
+                "examples.optimize_gain.subprocess.run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run:
+                artifacts = run_automatic_verification(args, best)
+
+        command = run.call_args.args[0]
+        self.assertIn(str(best.resolve()), command)
+        self.assertIn("--design-sheet", command)
+        self.assertIn("--jig-models", command)
+        self.assertEqual(command[command.index("--output") + 1], str(output.resolve()))
+        self.assertNotIn(output / "coil_formers.step", artifacts)
+
+    def test_automatic_verification_requires_ring_and_coil_artifacts(self):
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            best = output / "campaign_best.json"
+            best.write_text(
+                json.dumps(
+                    {
+                        "coil_count": 1,
+                        "design": {"coils": [{}]},
+                        "simulation": {
+                            "objective": {"pattern_mode": "ring"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for name in (
+                "verification.json",
+                "s11_verified.png",
+                "horizon_gain.png",
+                "principal_plane_gain.png",
+                "design_sheet.pdf",
+            ):
+                (output / name).write_bytes(b"artifact")
+            args = Namespace(
+                output=output,
+                match_bandwidth_mhz=20.0,
+                solver="cudss",
+            )
+            with (
+                patch(
+                    "examples.optimize_gain.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "target_ring_gain.*coil_formers",
+                ),
+            ):
+                run_automatic_verification(args, best)
 
     def test_finetune_population_is_multiscale_bounded_and_reproducible(self):
         space = make_space(AntennaDesign())
@@ -256,6 +717,43 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(monitor.stage_generations, 2)
         self.assertEqual(monitor.stagnation_generations, 2)
         self.assertGreater(monitor.last_diversity, 0)
+
+    def test_generation_monitor_resets_when_feasibility_first_appears(self):
+        space = make_space(AntennaDesign())
+        population = build_finetune_population(space, 10, seed=3)
+        objective = SimpleNamespace(
+            history=[
+                EvaluationRecord(
+                    tuple(space.initial_vector),
+                    1.0,
+                    -5.0,
+                    2.0,
+                    metrics={"worst_s11_db": -5.0},
+                )
+            ]
+        )
+        monitor = GenerationMonitor(
+            objective,
+            space,
+            "test_run",
+            restart_after=2,
+            incumbent_score=1.0,
+            improvement_tolerance=0.05,
+        )
+        self.assertFalse(monitor(SimpleNamespace(fun=1.0, population=population)))
+
+        objective.history.append(
+            EvaluationRecord(
+                tuple(space.initial_vector),
+                0.99,
+                -12.0,
+                2.0,
+                metrics={"worst_s11_db": -12.0},
+            )
+        )
+
+        self.assertFalse(monitor(SimpleNamespace(fun=0.99, population=population)))
+        self.assertEqual(monitor.stagnation_generations, 0)
 
     def test_restart_seeds_are_stable_and_do_not_overlap_adjacent_runs(self):
         self.assertEqual(restart_seed(2, 1), restart_seed(2, 1))
@@ -439,6 +937,87 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result.generations, 2)
         self.assertEqual(result.effective_stagnation_generations, 1)
         self.assertEqual(optimize.call_count, 2)
+
+    def test_finetune_stagnation_transitions_to_coordinate_polish(self):
+        space = make_space(design_for_coil_count(AntennaDesign(), 0))
+        schedule = CaseSchedule(
+            (), space, maxiter=3, population=5, evaluations_per_run=20
+        )
+
+        class FlatObjective:
+            def __init__(self):
+                self.history = []
+                self.simulation_evaluations = 0
+
+            @property
+            def best_record(self):
+                return min(self.history, key=lambda record: record.score, default=None)
+
+            def __call__(self, vector):
+                record = EvaluationRecord(
+                    tuple(vector),
+                    1.0,
+                    -12.0,
+                    2.0,
+                    metrics={"worst_s11_db": -12.0},
+                )
+                self.history.append(record)
+                self.simulation_evaluations += 1
+                return 1.0
+
+        objective = FlatObjective()
+
+        def fake_de(function, *, init, maxiter, callback, **_kwargs):
+            for row in init:
+                function(row)
+            generations = 0
+            for _ in range(maxiter):
+                for row in init:
+                    function(row)
+                generations += 1
+                if callback(SimpleNamespace(fun=1.0, population=init)):
+                    break
+            return SimpleNamespace(success=False, message="fake", nit=generations)
+
+        args = Namespace(
+            popsize=1,
+            polish=True,
+            polish_evaluations=5,
+            polish_min_improvement=0.001,
+            local_search_step=0.03,
+            local_search_min_step=0.001,
+            finetune_near_radius=0.03,
+            finetune_wide_radius=0.10,
+            finetune_mutation=(0.2, 0.6),
+            finetune_recombination=0.45,
+            restart_stagnation_generations=1,
+            restart_min_improvement=0.05,
+            s11_limit_db=-10.0,
+        )
+        polish_stats = CoordinatePolishStats(4, 4, 0, 1, 0.001, True)
+        with (
+            patch(
+                "examples.optimize_gain.differential_evolution",
+                side_effect=fake_de,
+            ) as optimize,
+            patch(
+                "examples.optimize_gain.coordinate_polish",
+                return_value=polish_stats,
+            ) as polish,
+        ):
+            result = run_finetune_optimizer(
+                objective,
+                space,
+                schedule,
+                args,
+                seed=2,
+                run_name="flat",
+            )
+
+        self.assertEqual(optimize.call_count, 1)
+        polish.assert_called_once()
+        self.assertEqual(result.transition_reason, "fine_stagnation")
+        self.assertEqual(result.polish, polish_stats)
 
     def test_fresh_clone_synthesizes_a_frequency_scaled_design(self):
         with patch("sys.argv", ["optimize_gain.py"]):
@@ -1203,6 +1782,7 @@ class CampaignTests(unittest.TestCase):
                 report_every=1,
                 variable_names=space.names,
                 frequency_hz=REFERENCE_DESIGN_FREQUENCY_HZ,
+                stage="fine_polish",
             )
             progress.set_context(space, (1, 1), seed=2)
             progress(record)
@@ -1223,6 +1803,9 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(
                 len((output / "evaluations.csv").read_text().splitlines()), 2
             )
+            with (output / "evaluations.csv").open(encoding="utf-8") as csv_file:
+                rows = list(csv.DictReader(csv_file))
+            self.assertEqual(rows[0]["stage"], "fine_polish")
 
     def test_progress_prefers_confirmed_feasible_checkpoint(self):
         space = make_space(AntennaDesign())

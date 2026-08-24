@@ -40,6 +40,7 @@ Command-line options use MHz, millimetres, and degrees where stated.
   - [Starting design and wire diameter](#starting-design-and-wire-diameter)
   - [Topology selection](#topology-selection)
   - [Coil parameterization and fine tuning](#coil-parameterization-and-fine-tuning)
+  - [Automatic rough-to-verified pipeline](#automatic-rough-to-verified-pipeline)
   - [Pattern, lobe, and beamwidth goals](#pattern-lobe-and-beamwidth-goals)
   - [Matching and physical constraints](#matching-and-physical-constraints)
   - [Budgets, seeds, restarts, and confirmation](#budgets-seeds-restarts-and-confirmation)
@@ -142,6 +143,24 @@ verification:
 The output directory must not already contain campaign files. This prevents an
 old and a new campaign from being mistaken for one run.
 
+For the complete unattended workflow, use `--automatic`:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --automatic `
+    --frequency-mhz 869.5 `
+    --wire-diameter-mm 1.6 `
+    --target-theta 100 `
+    --target-beamwidth-deg 50 `
+    --match-bandwidth-mhz 20 `
+    --hours 12 `
+    --solver cudss
+```
+
+This searches all requested topologies, fine-tunes and coordinate-polishes the
+winner, performs independent coarse/fine verification, and puts the drawing,
+forming STEP, plots, and reports in one timestamped optimization-result folder.
+
 ## Recommended design workflow
 
 1. **Choose the electrical goal.** Decide the operating frequency, required
@@ -155,6 +174,7 @@ old and a new campaign from being mistaken for one run.
 4. **Fine-tune the winner.** Warm-start from `campaign_best.json` and use
    `--finetune` to add multiscale populations, restarts, and local refinement.
    Coil sharing is controlled separately by `--lock-coils`.
+   Use `--automatic` to perform steps 3 through 5 without manual handoff.
 5. **Verify independently.** Run `verify_best.py` for a denser frequency sweep,
    finer mesh, and finer angular sampling.
 6. **Test numerical convergence on the actual winner.** Run
@@ -615,6 +635,61 @@ local-search budget are configurable. If a global campaign used
 `--lock-coils`, omit that flag from the fine-tuning command to release the coil
 dimensions.
 
+Manual fine mode normally ends with its existing multi-elite bounded coordinate
+search. `--polish` replaces that terminal refinement with a stricter
+single-incumbent coordinate descent; the two local refiners are not run back to
+back. Polish evaluates positive and negative changes to one normalized
+parameter at a time, accepts feasibility before raw score, and halves its step
+after a complete unsuccessful sweep. It stops after an unsuccessful sweep at
+`--local-search-min-step` or when its candidate reserve is exhausted. This is a
+local coordinate minimum at the configured numerical resolution—not a
+mathematical proof of a perfect design. Automatic mode always selects this
+stricter polish. The former SciPy behavior is available explicitly as
+`--scipy-polish`; it is broad-search-only, mutually exclusive with
+`--polish`, and not recommended for noisy or tightly budgeted EM objectives.
+
+### Automatic rough-to-verified pipeline
+
+`--automatic` is the hands-off production workflow:
+
+1. Run the broad multi-topology, multi-seed campaign. Each rough DE run stops
+   when `--restart-stagnation-generations` is reached, on SciPy convergence, or
+   at its candidate cap.
+2. Load the global rough winner and retain only its discrete turn topology.
+3. Run multiscale fine DE from that winner. Fine stagnation transitions directly
+   into `--polish` instead of spending the remainder on repeated DE restarts.
+4. Polish one parameter at a time until the configured coordinate resolution or
+   candidate cap is reached.
+5. Launch `verify_best.py` in an isolated process with `--design-sheet` and
+   `--jig-models`.
+
+By default, 65% of the optimizer candidate estimate is assigned to rough search
+and 35% to fine tuning plus polish. Change this with
+`--automatic-rough-fraction`. For `--maxiter`, the split accounts for the
+different rough/fine seed counts, topology counts, and population sizes instead
+of simply dividing generations: its `maxiter + 1` population-batch budget is
+shared across the pipeline. Automatic mode refuses a budget that cannot hold at
+least one rough population plus fine DE and its coordinate-polish reserve. It
+uses four rough seeds and two fine seeds unless `--seeds` is supplied
+explicitly. Candidate capacity left unused when rough runs stagnate or converge
+early is rolled forward into the fine/polish stage.
+
+`--hours` is an estimate based on `--seconds-per-eval`, not a hard wall-clock
+deadline. Incumbent confirmation simulations are counted separately and can be
+material during polish. Fine verification and fabrication are also outside the
+estimate because their runtime depends on the winning geometry and fine mesh.
+
+The root result directory contains the canonical `campaign_best.json`,
+`automatic_pipeline.json`, verification report, plots, `design_sheet.pdf`, and
+`coil_formers.step` when the winner has coils. Detailed search logs live under
+`rough_search/` and `fine_tune/`. The verifier checks fine-mesh worst-band S11
+against the configured limit and checks coarse/fine metric drift against 0.5
+dB. It also carries an uncertified or explicitly skipped open-region preflight
+forward as a warning. A numerical or matching warning produces
+`complete_with_warnings` in the pipeline manifest; a verifier/export failure records
+`verification_failed`. In either case, the optimizer winner and both stage logs
+remain intact.
+
 The normal search bounds are wavelength-based and then enlarged when needed to
 contain a valid warm start:
 
@@ -794,6 +869,11 @@ Important distinctions:
 | `run_summaries.json` | All completed optimizer-run summaries. |
 | `evaluations.csv` | Candidate-by-candidate variables, scores, metrics, failures, and confirmation data. |
 | `convergence_reference_design.json` | Numerical reference used by an automatic preflight. |
+| `automatic_pipeline.json` | Automatic stage status, selected winners, verification state, and artifact paths. |
+
+Automatic runs place detailed optimizer files under `rough_search/` and
+`fine_tune/`, then place the canonical best, verification JSON, plots, drawing,
+and forming STEP at the run root.
 
 The best-result JSON records the final physical design, search-space bounds,
 initial vector, topology, seed, objective components, S11 and far-field
@@ -823,6 +903,8 @@ Campaign and topology:
 | `--lock-coils` | off | Share one pitch and radius across all coils. |
 | `--warm-start` | reference | Raw design or optimizer-result JSON. |
 | `--finetune`, `--fine-tune` | off | Multiscale populations, restarts, and local refinement. |
+| `--automatic` | off | Rough search, winner fine tune, coordinate polish, verification, drawing, and forming tools. |
+| `--automatic-rough-fraction` | `0.65` | Automatic optimizer budget assigned to rough search. |
 | `--output` | timestamped directory | New campaign output directory. |
 | `--report-every` | `10` | Console reporting interval in candidate calls. |
 
@@ -834,12 +916,15 @@ Fine-tuning controls:
 | `--finetune-wide-radius` | `0.10` | Normalized wider-start population radius. |
 | `--finetune-mutation MIN MAX` | `0.20 0.60` | Differential-evolution mutation range. |
 | `--finetune-recombination` | `0.30` | Differential-evolution recombination. |
-| `--restart-stagnation-generations` | `10` | Generations without progress before restart. |
+| `--restart-stagnation-generations` | `10` | Generations without progress before manual-fine restart or automatic stage transition. |
 | `--restart-min-improvement` | `0.05` | Score improvement required to reset stagnation. |
 | `--local-search-evaluations` | `24` | Bounded local-search budget. |
 | `--local-search-step` | `0.03` | Initial normalized coordinate step. |
 | `--local-search-min-step` | `0.001` | Smallest normalized step. |
 | `--local-search-elites` | `3` | Number of elite starts for local search. |
+| `--polish` | off | Deterministic one-parameter-at-a-time coordinate polish. |
+| `--polish-evaluations` | `12 * variables` | Polish reserve, capped by the candidate budget. |
+| `--polish-min-improvement` | `0.001` | Smallest accepted polish score decrease. |
 
 Pattern and objective:
 
@@ -876,7 +961,7 @@ Numerics and convergence:
 | `--skip-convergence-check` | off | Bypass convergence preflight. |
 | `--no-auto-convergence` | off | Do not generate a missing certificate. |
 | `--require-convergence` | off | Abort unless a matching certificate passes. |
-| `--polish` | off | Enable SciPy broad-search polishing. Fine mode has its own local search. |
+| `--scipy-polish` | off | Legacy SciPy DE polish; unbudgeted and separate from coordinate polish. |
 
 ## Custom optimization API
 
@@ -958,10 +1043,15 @@ resolution, and a 0.30-wavelength air margin.
 
 Verification output includes:
 
-- `verification.json` with coarse and fine metrics;
+- `verification.json` with coarse/fine metrics and a `quality` verdict for the
+  configured worst-band S11 limit, 0.5 dB coarse/fine agreement, and numerical
+  preflight status;
 - `s11_verified.png`;
 - `horizon_gain.png`;
 - `principal_plane_gain.png`.
+
+For a non-horizon ring objective, verification also writes
+`target_ring_gain.png` at the requested theta.
 
 With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
 verification result, so the sheet includes dimensions, the verified S11 sweep,
@@ -972,9 +1062,10 @@ winding formers, sizing mandrels, transition witness marks, and radial gauge.
 For a zero-coil design the flag reports that no forming tools are needed.
 
 Use `--show-model`, `--show-mesh`, or `--show-3d` for interactive inspection,
-and `--skip-coarse` when only the fine run is needed. A warning is emitted for
-material coarse/fine metric disagreement; investigate it rather than treating
-the optimizer score as final truth.
+and `--skip-coarse` when only the fine run is needed. Beamwidth remains a soft
+optimization goal, so its verified value/error is reported as an observation
+rather than a pass/fail threshold. Investigate any quality warning rather than
+treating the optimizer score as final truth.
 
 ## Open-region convergence
 
