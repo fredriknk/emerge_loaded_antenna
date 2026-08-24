@@ -190,8 +190,14 @@ def test_gain_lobes_label_and_overlay_verified_target_rings():
     )
 
     labels = [line.get_label() for line in axis.lines]
-    assert "XY/horizon (target 90 deg)" in labels
-    assert "Target ring 130 deg" in labels
+    assert (
+        "XY/horizon - target 90 deg\n"
+        "min -0.10 | max 1.90 | avg 0.96 dBi"
+    ) in labels
+    assert (
+        "Target ring 130 deg\n"
+        "min 0.30 | max 2.30 | avg 1.36 dBi"
+    ) in labels
     assert "XZ/elevation" in labels
     figure.clear()
 

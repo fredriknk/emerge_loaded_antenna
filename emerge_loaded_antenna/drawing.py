@@ -790,6 +790,49 @@ def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
     return _azimuth_ring_gain(result, 90.0)
 
 
+def _target_ring_label(
+    theta_deg: float,
+    phi: np.ndarray,
+    gain_db: np.ndarray,
+    *,
+    horizon: bool = False,
+) -> str:
+    """Format verified min, max, and power-mean gain for a target ring."""
+    phi_values = np.asarray(phi, dtype=float)
+    gain_values = np.asarray(gain_db, dtype=float)
+    finite = np.isfinite(phi_values) & np.isfinite(gain_values)
+    phi_values = phi_values[finite]
+    gain_values = gain_values[finite]
+    if not gain_values.size:
+        raise ValueError("target-ring gain data is empty")
+
+    # Closed curves repeat their first sample at phi + 2*pi. Do not give that
+    # azimuth extra weight in the power-domain average.
+    if (
+        gain_values.size > 1
+        and math.isclose(
+            float(phi_values[-1] - phi_values[0]),
+            2.0 * np.pi,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        gain_values = gain_values[:-1]
+
+    minimum = float(np.min(gain_values))
+    maximum = float(np.max(gain_values))
+    average = float(10.0 * np.log10(np.mean(10.0 ** (gain_values / 10.0))))
+    name = (
+        f"XY/horizon - target {theta_deg:g} deg"
+        if horizon
+        else f"Target ring {theta_deg:g} deg"
+    )
+    return (
+        f"{name}\n"
+        f"min {minimum:.2f} | max {maximum:.2f} | avg {average:.2f} dBi"
+    )
+
+
 def _xz_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
     """Return a closed XZ elevation cut from a sampled 3-D far field.
 
@@ -893,7 +936,12 @@ def _draw_gain_lobes(
         np.maximum(xy_gain_db, radial_floor),
         linewidth=1.1,
         label=(
-            "XY/horizon (target 90 deg)"
+            _target_ring_label(
+                90.0,
+                phi,
+                xy_gain_db,
+                horizon=True,
+            )
             if any(
                 math.isclose(theta_deg, 90.0, abs_tol=1e-9)
                 for theta_deg in target_thetas
@@ -912,7 +960,7 @@ def _draw_gain_lobes(
             ring_phi,
             np.maximum(ring_gain_db, radial_floor),
             linewidth=1.1,
-            label=f"Target ring {theta_deg:g} deg",
+            label=_target_ring_label(theta_deg, ring_phi, ring_gain_db),
         )
     ax.set_rlim(radial_floor, radial_ceiling)
     frequency_hz = _result_frequency_hz(result)
