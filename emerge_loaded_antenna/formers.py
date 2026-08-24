@@ -418,7 +418,7 @@ def export_coil_formers(
     design: AntennaDesign,
     output: str | Path,
     *,
-    extra_length: float = 5e-3,
+    extra_length: float = 10e-3,
     groove_clearance: float = 0.1e-3,
     spacing: float = 5e-3,
     include_sizing_mandrels: bool = True,

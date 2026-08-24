@@ -1125,7 +1125,9 @@ requested theta rings overlaid.
 With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
 verification result, so the sheet includes dimensions, the verified S11 sweep,
 the XY/horizon and XZ/elevation gain lobes, and every configured optimizer
-target ring when the source campaign uses ring mode.
+target ring when the source campaign uses ring mode. Each verified target-ring
+legend entry reports its minimum, maximum, and power-averaged realized gain in
+dBi.
 
 With `--jig-models`, it writes `coil_formers.step`, containing the exact grooved
 winding formers, sizing mandrels, transition witness marks, and radial gauge.
