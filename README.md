@@ -547,6 +547,27 @@ warm start may be a raw design JSON or any optimizer JSON containing `design`:
     --output optimization_results\868mhz_fine
 ```
 
+Use `--random-start` when the synthesized or warm design should not occupy the
+explicit `x0` slot in a broad-search population:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --random-start `
+    --turn-cases none,1,1x1,1x2,1x1x1 `
+    --hours 8
+```
+
+For every topology and seed, the optimizer samples uniformly across every
+continuous variable's complete bounds until `AntennaDesign.validate()` accepts
+the combined geometry. That validated design replaces the reference/warm
+`x0`; the rest of SciPy's broad population remains globally distributed as
+usual. The template still supplies fixed properties such as radial count,
+handedness, impedance, and any dimensions not exposed as optimizer variables.
+The selected starts are printed and saved in `random_starts.json` with their
+seeds and complete designs. `--random-start` conflicts with manual
+`--fine-tune`; with `--automatic`, it applies only to rough search and the fine
+stage starts from the rough winner.
+
 Set the fixed conductor diameter explicitly with `--wire-diameter-mm` (or its
 alias `--wire-diameter`):
 
@@ -892,6 +913,7 @@ Important distinctions:
 | `run_summaries.json` | All completed optimizer-run summaries. |
 | `evaluations.csv` | Candidate-by-candidate variables, scores, metrics, failures, and confirmation data. |
 | `campaign_seeds.json` | Exact random or command-line seeds selected before candidate evaluation. |
+| `random_starts.json` | Validated per-topology/per-seed starting parameters and designs when `--random-start` is active. |
 | `convergence_reference_design.json` | Numerical reference used by an automatic preflight. |
 | `automatic_pipeline.json` | Automatic stage status, selected winners, verification state, and artifact paths. |
 
@@ -931,6 +953,7 @@ Campaign and topology:
 | `--turn-cases` | inherited | Explicit cases such as `none,1,1x2`. |
 | `--lock-coils` | off | Share one pitch and radius across all coils. |
 | `--warm-start` | reference | Raw design or optimizer-result JSON. |
+| `--random-start` | off | Replace broad-search `x0` with a reproducible validated uniform sample across complete bounds. |
 | `--finetune`, `--fine-tune` | off | Multiscale populations, restarts, and local refinement. |
 | `--automatic` | off | Rough search, winner fine tune, coordinate polish, verification, drawing, and forming tools. |
 | `--automatic-rough-fraction` | `0.65` | Automatic optimizer budget assigned to rough search. |

@@ -50,6 +50,7 @@ from examples.optimize_gain import (
     parse_turn_cases,
     progress_goal_text,
     random_seeds,
+    random_valid_start_vector,
     resolve_topology,
     restart_seed,
     run_automatic_pipeline,
@@ -524,6 +525,27 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(generated, (7, 8, 9))
 
+    def test_random_start_cli_is_broad_or_automatic_only(self):
+        with patch("sys.argv", ["optimize_gain.py", "--random-start"]):
+            broad = parse_args()
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--automatic", "--random-start"],
+        ):
+            automatic = parse_args()
+
+        self.assertTrue(broad.random_start)
+        self.assertTrue(automatic.random_start)
+
+        with (
+            patch(
+                "sys.argv",
+                ["optimize_gain.py", "--fine-tune", "--random-start"],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
     def test_automatic_cli_records_separate_random_stage_seeds(self):
         with patch("sys.argv", ["optimize_gain.py", "--automatic"]):
             args = parse_args()
@@ -565,6 +587,7 @@ class CampaignTests(unittest.TestCase):
                 [
                     "optimize_gain.py",
                     "--automatic",
+                    "--random-start",
                     "--maxiter",
                     "20",
                     "--coil-counts",
@@ -650,9 +673,11 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(len(stage_args), 2)
             rough, fine = stage_args
             self.assertFalse(rough.finetune)
+            self.assertTrue(rough.random_start)
             self.assertEqual(rough.pipeline_stage, "rough")
             self.assertEqual(rough.seeds, expected_rough_seeds)
             self.assertTrue(fine.finetune)
+            self.assertFalse(fine.random_start)
             self.assertTrue(fine.polish)
             self.assertEqual(fine.pipeline_stage, "fine_polish")
             self.assertEqual(fine.turn_cases, ((1, 1),))
@@ -670,6 +695,9 @@ class CampaignTests(unittest.TestCase):
             )
             self.assertEqual(manifest["status"], "complete")
             self.assertEqual(manifest["seeds"]["source"], "system_random")
+            self.assertTrue(
+                manifest["initialization"]["rough_random_start"]
+            )
             self.assertEqual(
                 manifest["seeds"]["rough"],
                 list(expected_rough_seeds),
@@ -831,6 +859,23 @@ class CampaignTests(unittest.TestCase):
         self.assertTrue(np.all(np.abs(normalized[1:10] - center) <= 0.03))
         self.assertTrue(np.all(np.abs(normalized[10:16] - center) <= 0.10))
         self.assertTrue(np.all((0 <= normalized) & (normalized <= 1)))
+
+    def test_random_start_is_valid_bounded_and_reproducible(self):
+        space = make_space(AntennaDesign())
+
+        first = random_valid_start_vector(space, 17, (1, 1))
+        repeated = random_valid_start_vector(space, 17, (1, 1))
+        different = random_valid_start_vector(space, 18, (1, 1))
+        normalized = space.normalize(first)
+
+        np.testing.assert_allclose(first, repeated)
+        self.assertFalse(np.allclose(first, different))
+        self.assertTrue(np.all((0 <= normalized) & (normalized <= 1)))
+        self.assertFalse(np.allclose(first, space.initial_vector))
+        space.decode(first).validate()
+
+        with self.assertRaisesRegex(ValueError, "max_attempts"):
+            random_valid_start_vector(space, 17, max_attempts=0)
 
     def test_finetune_population_samples_inside_boundary_intersections(self):
         space = make_space(AntennaDesign())
@@ -1715,6 +1760,84 @@ class CampaignTests(unittest.TestCase):
                 best["simulation"]["search_bounds"]["maximum_height_source"],
                 "automatic",
             )
+
+    def test_campaign_uses_and_records_validated_random_x0(self):
+        spaces = []
+
+        class FakeObjective:
+            def __init__(self, space, *, on_evaluation, **kwargs):
+                spaces.append(space)
+                record = EvaluationRecord(
+                    tuple(space.initial_vector),
+                    -1.0,
+                    -12.0,
+                    3.0,
+                    metrics={
+                        "worst_s11_db": -11.0,
+                        "horizon_p10_gain_dbi": 2.0,
+                    },
+                )
+                self.best_record = record
+                self.history = [record]
+                on_evaluation(record)
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--random-start",
+                    "--seeds",
+                    "17",
+                    "--maxiter",
+                    "0",
+                    "--skip-convergence-check",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+            with (
+                patch(
+                    "examples.optimize_gain.RobustGainObjective",
+                    FakeObjective,
+                ),
+                patch(
+                    "examples.optimize_gain.differential_evolution",
+                    return_value=SimpleNamespace(success=True, message="fake"),
+                ) as optimize,
+            ):
+                run_campaign(args)
+
+            random_starts = json.loads(
+                (output / "random_starts.json").read_text(encoding="utf-8")
+            )
+            summaries = json.loads(
+                (output / "run_summaries.json").read_text(encoding="utf-8")
+            )
+            best = json.loads(
+                (output / "campaign_best.json").read_text(encoding="utf-8")
+            )
+
+        x0 = np.asarray(optimize.call_args.kwargs["x0"])
+        recorded = random_starts["starts"][0]
+        recorded_vector = np.asarray(
+            [recorded["parameters"][name] for name in spaces[0].names]
+        )
+        np.testing.assert_allclose(x0, recorded_vector)
+        self.assertFalse(np.allclose(x0, spaces[0].initial_vector))
+        spaces[0].decode(x0).validate()
+        self.assertEqual(random_starts["seed_source"], "command_line")
+        self.assertEqual(recorded["seed"], 17)
+        self.assertEqual(
+            summaries["runs"][0]["optimizer"]["initialization"],
+            "validated_uniform_random_x0",
+        )
+        self.assertEqual(
+            best["simulation"]["initialization"]["policy"],
+            "validated_uniform_random_x0",
+        )
 
     def test_campaign_records_multiple_ring_targets_and_csv_metrics(self):
         objective_options = []

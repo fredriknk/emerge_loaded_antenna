@@ -1062,8 +1062,16 @@ def result_payload(
     candidate_evaluations: int | None = None,
     simulation_evaluations: int | None = None,
     maximum_s11_db: float | None = None,
+    initial_vector: tuple[float, ...] | np.ndarray | None = None,
 ) -> dict:
     design = space.decode(record.vector)
+    start = (
+        space.initial_vector
+        if initial_vector is None
+        else np.asarray(initial_vector, dtype=float)
+    )
+    if start.shape != (len(space.variables),):
+        raise ValueError("initial_vector has the wrong dimension")
     payload = {
         "frequency_hz": frequency_hz,
         "objective": record.score,
@@ -1084,7 +1092,7 @@ def result_payload(
         "search_space": {
             "initial_variables": {
                 name: float(value)
-                for name, value in zip(space.names, space.initial_vector)
+                for name, value in zip(space.names, start, strict=True)
             },
             "bounds": {
                 name: [lower, upper]
@@ -1244,6 +1252,7 @@ class CampaignProgress:
         self.simulation_metadata = simulation_metadata
         self.stage = stage
         self.space: DesignSpace | None = None
+        self.initial_vector: np.ndarray | None = None
         self.turn_case: tuple[int, ...] = ()
         self.seed = 0
         output.mkdir(parents=True, exist_ok=True)
@@ -1301,10 +1310,17 @@ class CampaignProgress:
         space: DesignSpace,
         turn_case: tuple[int, ...],
         seed: int,
+        initial_vector: tuple[float, ...] | np.ndarray | None = None,
     ) -> None:
         self.space = space
         self.turn_case = turn_case
         self.seed = seed
+        self.initial_vector = np.asarray(
+            space.initial_vector if initial_vector is None else initial_vector,
+            dtype=float,
+        )
+        if self.initial_vector.shape != (len(space.variables),):
+            raise ValueError("initial_vector has the wrong dimension")
 
     def __call__(self, record: EvaluationRecord) -> None:
         if self.space is None:
@@ -1334,6 +1350,7 @@ class CampaignProgress:
                     candidate_evaluations=self.candidate_count,
                     simulation_evaluations=self.simulation_count,
                     maximum_s11_db=self.maximum_s11_db,
+                    initial_vector=self.initial_vector,
                 )
                 self.topology_payloads[self.turn_case] = topology_payload
                 topology_name = format_turn_case(self.turn_case)
@@ -1360,6 +1377,7 @@ class CampaignProgress:
                     candidate_evaluations=self.candidate_count,
                     simulation_evaluations=self.simulation_count,
                     maximum_s11_db=self.maximum_s11_db,
+                    initial_vector=self.initial_vector,
                 )
                 write_json(self.output / "campaign_best.json", payload)
 
@@ -1644,6 +1662,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--random-start",
+        action="store_true",
+        help=(
+            "replace the reference/warm x0 in each broad-search run with a "
+            "validated uniform random design inside the complete bounds"
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="run directory; defaults to a new timestamped directory",
@@ -1850,6 +1876,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scipy-polish is not used by --automatic")
     if args.finetune and args.scipy_polish:
         parser.error("--scipy-polish is only available for broad search")
+    if args.random_start and args.finetune:
+        parser.error(
+            "--random-start conflicts with --fine-tune; use broad search or "
+            "--automatic so fine-tuning starts from the rough winner"
+        )
     if args.skip_convergence_check and args.require_convergence:
         parser.error("--skip-convergence-check and --require-convergence conflict")
     if not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0:
@@ -2248,6 +2279,38 @@ def restart_seed(seed: int, restart_index: int) -> int:
     return int(sequence.generate_state(1, dtype=np.uint32)[0])
 
 
+def random_valid_start_vector(
+    space: DesignSpace,
+    seed: int,
+    turn_case: tuple[int, ...] = (),
+    max_attempts: int = 1_000,
+) -> np.ndarray:
+    """Sample a reproducible valid optimizer start across complete bounds."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    entropy = (
+        int(seed) % SEED_UPPER_BOUND,
+        0xA17E_55ED,
+        len(turn_case),
+        *(int(turns) for turns in turn_case),
+    )
+    rng = np.random.default_rng(np.random.SeedSequence(entropy))
+    last_error: ValueError | None = None
+    for _ in range(max_attempts):
+        candidate = space.denormalize(rng.random(len(space.variables)))
+        try:
+            space.decode(candidate)
+        except ValueError as error:
+            last_error = error
+            continue
+        return candidate
+    detail = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(
+        f"could not sample a valid random start in {max_attempts} attempts"
+        f"{detail}"
+    )
+
+
 @dataclass(frozen=True)
 class FinetuneRunResult:
     result: object
@@ -2528,6 +2591,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     frequency_hz = args.frequency_hz
     args.finetune = bool(getattr(args, "finetune", False))
     args.lock_coils = bool(getattr(args, "lock_coils", False))
+    args.random_start = bool(getattr(args, "random_start", False))
     args.target_thetas = tuple(
         float(value)
         for value in getattr(args, "target_thetas", (args.target_theta,))
@@ -2599,6 +2663,16 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         "seeds": {
             "source": args.seed_source,
             "values": list(args.seeds),
+        },
+        "initialization": {
+            "random_start": args.random_start and not args.finetune,
+            "policy": (
+                "validated_uniform_random_x0"
+                if args.random_start and not args.finetune
+                else "finetune_multiscale_from_start_design"
+                if args.finetune
+                else "reference_or_warm_x0"
+            ),
         },
         "target_frequency_hz": frequency_hz,
         "match_bandwidth_hz": args.match_bandwidth_mhz * 1e6,
@@ -2713,7 +2787,11 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
             if args.finetune
             else {
                 "mode": "global_differential_evolution",
-                "initialization": "scipy_default_with_warm_x0",
+                "initialization": (
+                    "scipy_default_with_validated_random_x0"
+                    if args.random_start
+                    else "scipy_default_with_warm_x0"
+                ),
                 "coordinate_polish": bool(getattr(args, "polish", False)),
                 "scipy_polish": bool(getattr(args, "scipy_polish", False)),
                 "stagnation_transition_generations": int(
@@ -2806,6 +2884,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         },
     )
     run_summaries = []
+    random_start_records: list[dict] = []
 
     low_mhz = args.frequency_mhz - args.match_bandwidth_mhz / 2
     high_mhz = args.frequency_mhz + args.match_bandwidth_mhz / 2
@@ -2922,6 +3001,11 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         + ", ".join(format_turn_case(case) for case in args.turn_cases)
     )
     print(f"Seeds           : {args.seeds} [{args.seed_source}]")
+    if args.random_start and not args.finetune:
+        print(
+            "Start policy    : validated uniform random x0 per topology and seed; "
+            "reference/warm design supplies fixed properties and bounds only"
+        )
     print("Search schedule :")
     for schedule in schedules:
         allocation = ""
@@ -2972,7 +3056,6 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                 space = schedule.space
                 run_name = f"turns_{format_turn_case(turn_case)}_seed_{seed}"
                 print(f"\nStarting {run_name}", flush=True)
-                progress.set_context(space, turn_case, seed)
                 options = SimulationOptions(
                     sweep=FrequencySweep(
                         center=frequency_hz,
@@ -3017,6 +3100,60 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                 lower = np.asarray([bound[0] for bound in space.bounds])
                 upper = np.asarray([bound[1] for bound in space.bounds])
                 warm_vector = np.clip(space.initial_vector, lower, upper)
+                start_vector = warm_vector
+                initialization = (
+                    "finetune_multiscale_from_start_design"
+                    if args.finetune
+                    else "reference_or_warm_x0"
+                )
+                if args.random_start and not args.finetune:
+                    start_vector = random_valid_start_vector(
+                        space,
+                        seed,
+                        turn_case,
+                    )
+                    initialization = "validated_uniform_random_x0"
+                    start_record = {
+                        "run": run_name,
+                        "seed": seed,
+                        "turn_case": list(turn_case),
+                        "parameters": {
+                            name: float(value)
+                            for name, value in zip(
+                                space.names,
+                                start_vector,
+                                strict=True,
+                            )
+                        },
+                        "design": asdict(space.decode(start_vector)),
+                    }
+                    random_start_records.append(start_record)
+                    write_json(
+                        args.output / "random_starts.json",
+                        {
+                            "policy": "validated_uniform_random_x0",
+                            "seed_source": args.seed_source,
+                            "starts": random_start_records,
+                        },
+                    )
+                    print(
+                        "    random x0: "
+                        + ", ".join(
+                            format_parameter(name, value)
+                            for name, value in zip(
+                                space.names,
+                                start_vector,
+                                strict=True,
+                            )
+                        ),
+                        flush=True,
+                    )
+                progress.set_context(
+                    space,
+                    turn_case,
+                    seed,
+                    initial_vector=start_vector,
+                )
                 if args.finetune:
                     fine_result = run_finetune_optimizer(
                         objective,
@@ -3117,7 +3254,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                         seed=seed,
                         workers=1,
                         updating="immediate",
-                        x0=warm_vector,
+                        x0=start_vector,
                         callback=monitor,
                         tol=1e-3,
                     )
@@ -3171,6 +3308,17 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                             else None
                         ),
                     }
+                optimizer_details.update(
+                    initialization=initialization,
+                    initial_parameters={
+                        name: float(value)
+                        for name, value in zip(
+                            space.names,
+                            start_vector,
+                            strict=True,
+                        )
+                    },
+                )
                 confirmations = list(
                     getattr(objective, "confirmation_history", ())
                 )
@@ -3199,6 +3347,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                     candidate_evaluations=progress.candidate_count,
                     simulation_evaluations=progress.simulation_count,
                     maximum_s11_db=args.s11_limit_db,
+                    initial_vector=start_vector,
                 )
                 summary.update(
                     optimizer_success=bool(getattr(result, "success", False)),
@@ -3635,6 +3784,10 @@ def run_automatic_pipeline(args: argparse.Namespace) -> Path:
                 getattr(args, "automatic_finetune_seeds", args.seeds)
             ),
         },
+        "initialization": {
+            "rough_random_start": bool(getattr(args, "random_start", False)),
+            "fine_starts_from_rough_winner": True,
+        },
     }
     write_json(manifest_path, manifest)
 
@@ -3725,6 +3878,7 @@ def run_automatic_pipeline(args: argparse.Namespace) -> Path:
         fine = copy.deepcopy(args)
         fine.automatic = False
         fine.finetune = True
+        fine.random_start = False
         fine.polish = True
         fine.scipy_polish = False
         fine.output = fine_output
