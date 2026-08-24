@@ -674,6 +674,11 @@ uses four rough seeds and two fine seeds unless `--seeds` is supplied
 explicitly. Candidate capacity left unused when rough runs stagnate or converge
 early is rolled forward into the fine/polish stage.
 
+Omitted seeds are generated from system randomness at campaign startup and
+recorded in result metadata. Automatic mode records both its rough and
+fine/polish seed sets in `automatic_pipeline.json` before simulation begins.
+Pass the recorded values back through `--seeds` to reproduce a population.
+
 `--hours` is an estimate based on `--seconds-per-eval`, not a hard wall-clock
 deadline. Incumbent confirmation simulations are counted separately and can be
 material during polish. Fine verification and fabrication are also outside the
@@ -825,10 +830,11 @@ Choose exactly one campaign budget style:
 - `--hours H` estimates an evaluation budget from `--seconds-per-eval`, divides
   it across topology cases and seeds, and accounts for population dimension.
 
-The default population multiplier is 8. The default seed count is four for a
-broad campaign and two for fine tuning. Runs are sequential because EMerge and
-Gmsh maintain process-global state. For independent external parallelism, use
-separate processes and separate output directories, never threads.
+The default population multiplier is 8. By default, four system-random seeds
+are generated for a broad campaign and two for fine tuning; their exact values
+are printed and recorded. Runs are sequential because EMerge and Gmsh maintain
+process-global state. For independent external parallelism, use separate
+processes and separate output directories, never threads.
 
 An apparent new best is repeated `--confirmation-runs` times (default 3, an odd
 number). The median score becomes the consensus; outliers beyond
@@ -868,6 +874,7 @@ Important distinctions:
 | `topology_leaderboard.json` | Ranked topology results with feasibility information. |
 | `run_summaries.json` | All completed optimizer-run summaries. |
 | `evaluations.csv` | Candidate-by-candidate variables, scores, metrics, failures, and confirmation data. |
+| `campaign_seeds.json` | Exact random or command-line seeds selected before candidate evaluation. |
 | `convergence_reference_design.json` | Numerical reference used by an automatic preflight. |
 | `automatic_pipeline.json` | Automatic stage status, selected winners, verification state, and artifact paths. |
 
@@ -901,7 +908,7 @@ Campaign and topology:
 | `--maxiter` / `--hours` | `20` iterations | Mutually exclusive generation or time budget. |
 | `--seconds-per-eval` | `8` | Estimate used to translate hours into evaluations. |
 | `--popsize` | `8` | Differential-evolution population multiplier. |
-| `--seeds` | broad `2,3,4,5`; fine `2,3` | Independent deterministic seeds. |
+| `--seeds` | random: broad 4; fine 2 | Explicit comma-separated seeds for reproducibility; omitted values are randomized and recorded. |
 | `--coil-count` | inherited | One fixed coil count. |
 | `--coil-counts` | inherited | Comma-separated one-turn topologies. |
 | `--turn-cases` | inherited | Explicit cases such as `none,1,1x2`. |

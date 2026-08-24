@@ -8,6 +8,7 @@ import csv
 import importlib.util
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -117,6 +118,9 @@ DEFAULT_LOCAL_SEARCH_STEP = 0.03
 DEFAULT_LOCAL_SEARCH_MIN_STEP = 0.001
 DEFAULT_POLISH_MIN_IMPROVEMENT = 0.001
 DEFAULT_AUTOMATIC_ROUGH_FRACTION = 0.65
+DEFAULT_BROAD_SEED_COUNT = 4
+DEFAULT_FINE_SEED_COUNT = 2
+SEED_UPPER_BOUND = 2**32
 
 
 def elapsed_text(seconds: float) -> str:
@@ -128,6 +132,21 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     if not result:
         raise argparse.ArgumentTypeError("provide at least one integer")
     return result
+
+
+def random_seeds(count: int) -> tuple[int, ...]:
+    """Generate distinct system-random uint32 seeds for one campaign."""
+    if count < 1:
+        raise ValueError("seed count must be positive")
+    generated: list[int] = []
+    seen: set[int] = set()
+    while len(generated) < count:
+        seed = secrets.randbelow(SEED_UPPER_BOUND)
+        if seed in seen:
+            continue
+        seen.add(seed)
+        generated.append(seed)
+    return tuple(generated)
 
 
 def parse_coil_counts(value: str) -> tuple[int, ...]:
@@ -1438,8 +1457,9 @@ def parse_args() -> argparse.Namespace:
         "--seeds",
         type=parse_int_list,
         help=(
-            "comma-separated RNG seeds; defaults to 2,3 for fine-tuning and "
-            "2,3,4,5 for broad searches"
+            "comma-separated reproducible RNG seeds; when omitted, generate "
+            "and record two system-random seeds for fine-tuning or four for "
+            "broad search"
         ),
     )
     topology = parser.add_mutually_exclusive_group()
@@ -1740,7 +1760,22 @@ def parse_args() -> argparse.Namespace:
     if args.target_phi is None:
         args.target_phi = 0.0
     if args.seeds is None:
-        args.seeds = (2, 3) if args.finetune else (2, 3, 4, 5)
+        args.seed_source = "system_random"
+        if args.automatic:
+            generated = random_seeds(
+                DEFAULT_BROAD_SEED_COUNT + DEFAULT_FINE_SEED_COUNT
+            )
+            args.seeds = generated[:DEFAULT_BROAD_SEED_COUNT]
+            args.automatic_finetune_seeds = generated[DEFAULT_BROAD_SEED_COUNT:]
+        elif args.finetune:
+            args.seeds = random_seeds(DEFAULT_FINE_SEED_COUNT)
+            args.automatic_finetune_seeds = args.seeds
+        else:
+            args.seeds = random_seeds(DEFAULT_BROAD_SEED_COUNT)
+            args.automatic_finetune_seeds = args.seeds
+    else:
+        args.seed_source = "command_line"
+        args.automatic_finetune_seeds = args.seeds
     if args.polish and args.scipy_polish:
         parser.error("--polish and --scipy-polish are mutually exclusive")
     if args.automatic and args.scipy_polish:
@@ -2423,7 +2458,14 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     args.finetune = bool(getattr(args, "finetune", False))
     args.lock_coils = bool(getattr(args, "lock_coils", False))
     if getattr(args, "seeds", None) is None:
-        args.seeds = (2, 3) if args.finetune else (2, 3, 4, 5)
+        args.seeds = random_seeds(
+            DEFAULT_FINE_SEED_COUNT
+            if args.finetune
+            else DEFAULT_BROAD_SEED_COUNT
+        )
+        args.seed_source = "system_random"
+    elif not hasattr(args, "seed_source"):
+        args.seed_source = "command_line"
     args.s11_margin_target_db = float(
         getattr(args, "s11_margin_target_db", -12.0)
     )
@@ -2478,6 +2520,10 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         "mesh": asdict(mesh),
         "open_region": asdict(open_region),
         "solver": args.solver,
+        "seeds": {
+            "source": args.seed_source,
+            "values": list(args.seeds),
+        },
         "target_frequency_hz": frequency_hz,
         "match_bandwidth_hz": args.match_bandwidth_mhz * 1e6,
         "farfield_angular_step_deg": args.angular_step,
@@ -2654,6 +2700,15 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         maximum_s11_db=args.s11_limit_db,
         stage=getattr(args, "pipeline_stage", "optimization"),
     )
+    write_json(
+        args.output / "campaign_seeds.json",
+        {
+            "source": args.seed_source,
+            "seeds": list(args.seeds),
+            "pipeline_stage": getattr(args, "pipeline_stage", "optimization"),
+            "frequency_hz": frequency_hz,
+        },
+    )
     run_summaries = []
 
     low_mhz = args.frequency_mhz - args.match_bandwidth_mhz / 2
@@ -2761,7 +2816,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         "Turn cases      : "
         + ", ".join(format_turn_case(case) for case in args.turn_cases)
     )
-    print(f"Seeds           : {args.seeds}")
+    print(f"Seeds           : {args.seeds} [{args.seed_source}]")
     print("Search schedule :")
     for schedule in schedules:
         allocation = ""
@@ -3161,9 +3216,10 @@ def _automatic_budget_model(args: argparse.Namespace) -> AutomaticBudgetModel:
         variable_counts.append(len(space.variables))
         populations.append(max(5, args.popsize*len(space.variables)))
 
-    seeds_explicit = bool(getattr(args, "seeds_explicit", False))
-    rough_seed_count = len(args.seeds if seeds_explicit else (2, 3, 4, 5))
-    fine_seed_count = len(args.seeds if seeds_explicit else (2, 3))
+    rough_seed_count = len(args.seeds)
+    fine_seed_count = len(
+        getattr(args, "automatic_finetune_seeds", args.seeds)
+    )
     largest_population = max(populations)
     requested_polish = getattr(args, "polish_evaluations", None)
     polish_batches = max(
@@ -3449,6 +3505,13 @@ def run_automatic_pipeline(args: argparse.Namespace) -> Path:
             "confirmation_simulations_counted_separately": True,
             "verification_outside_optimizer_budget": True,
         },
+        "seeds": {
+            "source": getattr(args, "seed_source", "command_line"),
+            "rough": list(args.seeds),
+            "fine_polish": list(
+                getattr(args, "automatic_finetune_seeds", args.seeds)
+            ),
+        },
     }
     write_json(manifest_path, manifest)
 
@@ -3459,9 +3522,7 @@ def run_automatic_pipeline(args: argparse.Namespace) -> Path:
     rough.scipy_polish = False
     rough.output = args.output / "rough_search"
     rough.hours, rough.maxiter = rough_budget
-    rough.seeds = (
-        args.seeds if getattr(args, "seeds_explicit", False) else (2, 3, 4, 5)
-    )
+    rough.seeds = tuple(args.seeds)
     rough.rough_stagnation_generations = args.restart_stagnation_generations
     rough.pipeline_stage = "rough"
     print("\nAUTOMATIC STAGE 1/4: ROUGH TOPOLOGY SEARCH")
@@ -3555,8 +3616,8 @@ def run_automatic_pipeline(args: argparse.Namespace) -> Path:
             else "command_line"
         )
         fine.hours, fine.maxiter = fine_budget
-        fine.seeds = (
-            args.seeds if getattr(args, "seeds_explicit", False) else (2, 3)
+        fine.seeds = tuple(
+            getattr(args, "automatic_finetune_seeds", args.seeds)
         )
         fine.pipeline_stage = "fine_polish"
         print("\nAUTOMATIC STAGES 2-3/4: FINE SEARCH + COORDINATE POLISH")

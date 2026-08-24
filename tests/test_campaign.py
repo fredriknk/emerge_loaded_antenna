@@ -49,6 +49,7 @@ from examples.optimize_gain import (
     parse_coil_counts,
     parse_turn_cases,
     progress_goal_text,
+    random_seeds,
     resolve_topology,
     restart_seed,
     run_automatic_pipeline,
@@ -441,9 +442,13 @@ class CampaignTests(unittest.TestCase):
         with patch("sys.argv", ["optimize_gain.py", "--finetune"]):
             fine = parse_args()
 
-        self.assertEqual(broad.seeds, (2, 3, 4, 5))
+        self.assertEqual(len(broad.seeds), 4)
+        self.assertEqual(len(set(broad.seeds)), 4)
+        self.assertEqual(broad.seed_source, "system_random")
         self.assertEqual(broad.pattern, "horizon")
-        self.assertEqual(fine.seeds, (2, 3))
+        self.assertEqual(len(fine.seeds), 2)
+        self.assertEqual(len(set(fine.seeds)), 2)
+        self.assertEqual(fine.seed_source, "system_random")
         self.assertEqual(fine.confirmation_runs, 3)
         self.assertEqual(fine.s11_margin_target_db, -12.0)
         self.assertEqual(fine.s11_margin_weight, 0.10)
@@ -452,13 +457,38 @@ class CampaignTests(unittest.TestCase):
         self.assertFalse(broad.polish)
         self.assertFalse(broad.scipy_polish)
 
-    def test_automatic_cli_preserves_broad_seed_defaults(self):
+    def test_random_seeds_are_distinct_and_retry_collisions(self):
+        with patch(
+            "examples.optimize_gain.secrets.randbelow",
+            side_effect=(7, 7, 8, 9),
+        ):
+            generated = random_seeds(3)
+
+        self.assertEqual(generated, (7, 8, 9))
+
+    def test_automatic_cli_records_separate_random_stage_seeds(self):
         with patch("sys.argv", ["optimize_gain.py", "--automatic"]):
             args = parse_args()
 
         self.assertTrue(args.automatic)
         self.assertFalse(args.seeds_explicit)
-        self.assertEqual(args.seeds, (2, 3, 4, 5))
+        self.assertEqual(args.seed_source, "system_random")
+        self.assertEqual(len(args.seeds), 4)
+        self.assertEqual(len(args.automatic_finetune_seeds), 2)
+        self.assertEqual(
+            len({*args.seeds, *args.automatic_finetune_seeds}),
+            6,
+        )
+
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--automatic", "--seeds", "10,11"],
+        ):
+            explicit = parse_args()
+        self.assertTrue(explicit.seeds_explicit)
+        self.assertEqual(explicit.seed_source, "command_line")
+        self.assertEqual(explicit.seeds, (10, 11))
+        self.assertEqual(explicit.automatic_finetune_seeds, (10, 11))
 
         with (
             patch(
@@ -487,6 +517,8 @@ class CampaignTests(unittest.TestCase):
                 ],
             ):
                 args = parse_args()
+            expected_rough_seeds = args.seeds
+            expected_fine_seeds = args.automatic_finetune_seeds
 
             stage_args = []
 
@@ -561,12 +593,12 @@ class CampaignTests(unittest.TestCase):
             rough, fine = stage_args
             self.assertFalse(rough.finetune)
             self.assertEqual(rough.pipeline_stage, "rough")
-            self.assertEqual(rough.seeds, (2, 3, 4, 5))
+            self.assertEqual(rough.seeds, expected_rough_seeds)
             self.assertTrue(fine.finetune)
             self.assertTrue(fine.polish)
             self.assertEqual(fine.pipeline_stage, "fine_polish")
             self.assertEqual(fine.turn_cases, ((1, 1),))
-            self.assertEqual(fine.seeds, (2, 3))
+            self.assertEqual(fine.seeds, expected_fine_seeds)
             self.assertEqual(fine.maximum_height_mm, 432.1)
             self.assertEqual(
                 fine.maximum_height_source_override,
@@ -579,6 +611,15 @@ class CampaignTests(unittest.TestCase):
                 (output / "automatic_pipeline.json").read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(manifest["seeds"]["source"], "system_random")
+            self.assertEqual(
+                manifest["seeds"]["rough"],
+                list(expected_rough_seeds),
+            )
+            self.assertEqual(
+                manifest["seeds"]["fine_polish"],
+                list(expected_fine_seeds),
+            )
             self.assertAlmostEqual(
                 manifest["budget"]["estimated_rough_candidate_fraction"],
                 0.65,
@@ -1529,8 +1570,13 @@ class CampaignTests(unittest.TestCase):
             best = json.loads(
                 (output / "campaign_best.json").read_text(encoding="utf-8")
             )
+            recorded_seeds = json.loads(
+                (output / "campaign_seeds.json").read_text(encoding="utf-8")
+            )
 
             self.assertEqual(optimize.call_count, 3)
+            self.assertEqual(recorded_seeds["source"], "command_line")
+            self.assertEqual(recorded_seeds["seeds"], [2])
             self.assertTrue(
                 all(item["confirmation_runs"] == 3 for item in objective_options)
             )
@@ -1557,6 +1603,10 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(
                 best["simulation"]["coil_parameterization"],
                 "independent",
+            )
+            self.assertEqual(
+                best["simulation"]["seeds"],
+                {"source": "command_line", "values": [2]},
             )
             self.assertEqual(
                 best["simulation"]["search_bounds"]["policy"],
