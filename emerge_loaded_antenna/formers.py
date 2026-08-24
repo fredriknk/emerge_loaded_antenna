@@ -423,7 +423,7 @@ def export_coil_formers(
     spacing: float = 5e-3,
     include_sizing_mandrels: bool = True,
     sizing_groove_depth: float = 0.2e-3,
-    marker_depth: float = 0.15e-3,
+    marker_depth: float = 0.5e-3,
     marker_width: float = 0.35e-3,
     marker_length: float = 2.0e-3,
     include_radial_gauge: bool = True,
