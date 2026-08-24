@@ -631,6 +631,10 @@ Choose one of three pattern modes:
 | `directional` | Gain at requested theta/phi | Optionally targets HPBW on two orthogonal cuts. |
 | `peak` | Global peak gain | No directional or horizon-shape penalty. |
 
+Supplying `--target-theta`, `--target-phi`, or `--target-beamwidth-deg`
+automatically selects directional mode. An explicit conflicting choice such as
+`--pattern horizon --target-theta 100` is rejected immediately.
+
 Directional example:
 
 ```powershell
@@ -1028,13 +1032,17 @@ transition, straight, and radial bounds include diameter-dependent clearance.
 Reduce the requested diameter or choose a frequency/topology with enough
 physical room.
 
-**`--target-beamwidth-deg` is rejected.** It requires
-`--pattern directional`. The target must be greater than zero and no more than
-360 degrees.
+**A directional target conflicts with `--pattern`.** Directional target flags
+select directional mode automatically. Remove an explicit `--pattern horizon`
+or `--pattern peak`, or change it to `--pattern directional`. A beamwidth target
+must be greater than zero and no more than 360 degrees.
 
 **The lobe points in the wrong direction.** Confirm the spherical convention:
 theta is measured from +Z and phi from +X toward +Y. Do not confuse target
 theta with `radial_angle_deg`, which controls the physical ground radials.
+Directional mode maximizes gain at the requested coordinate; it does not force
+the global peak to occur there. Verification reports requested-direction gain
+and global peak direction separately.
 
 **The beamwidth looks quantized.** Reduce `--angular-step` and verify with the
 0.5-degree default used by `verify_best.py`. A grid cannot resolve features

@@ -35,11 +35,36 @@ def gain_db(farfield) -> np.ndarray:
     return 20*np.log10(np.maximum(amplitude, 1e-12))
 
 
-def result_summary(result: SimulationResult, frequency_hz: float) -> dict:
+def directional_target_from_payload(payload: object) -> dict | None:
+    """Recover a directional objective from an optimizer result payload."""
+    if not isinstance(payload, dict):
+        return None
+    simulation = payload.get("simulation")
+    if not isinstance(simulation, dict):
+        return None
+    objective = simulation.get("objective")
+    if not isinstance(objective, dict) or objective.get("pattern_mode") != "directional":
+        return None
+    return {
+        "theta_deg": float(objective.get("target_theta_deg", 90.0)),
+        "phi_deg": float(objective.get("target_phi_deg", 0.0)),
+        "beamwidth_deg": (
+            float(objective["target_beamwidth_deg"])
+            if objective.get("target_beamwidth_deg") is not None
+            else None
+        ),
+    }
+
+
+def result_summary(
+    result: SimulationResult,
+    frequency_hz: float,
+    directional_target: dict | None = None,
+) -> dict:
     pattern = result.farfield_metrics
     if pattern is None:
         raise RuntimeError("verification far field was not computed")
-    return {
+    summary = {
         "s11_at_target_db": result.s11_db_at(frequency_hz),
         "worst_s11_db": float(np.max(result.s11_db)),
         "best_s11_db": float(np.min(result.s11_db)),
@@ -68,6 +93,25 @@ def result_summary(result: SimulationResult, frequency_hz: float) -> dict:
         "frequencies_hz": result.frequencies.tolist(),
         "s11_db": result.s11_db.tolist(),
     }
+    if directional_target is not None:
+        theta_deg = directional_target["theta_deg"]
+        phi_deg = directional_target["phi_deg"]
+        summary.update(
+            target_theta_deg=theta_deg,
+            target_phi_deg=phi_deg,
+            target_gain_dbi=result.gain_db_at(theta_deg, phi_deg),
+        )
+        if directional_target["beamwidth_deg"] is not None:
+            elevation_width, azimuth_width = result.directional_beamwidths_deg(
+                theta_deg,
+                phi_deg,
+            )
+            summary.update(
+                target_beamwidth_deg=directional_target["beamwidth_deg"],
+                elevation_beamwidth_deg=elevation_width,
+                azimuth_beamwidth_deg=azimuth_width,
+            )
+    return summary
 
 
 def print_summary(name: str, summary: dict, frequency_hz: float) -> None:
@@ -93,6 +137,18 @@ def print_summary(name: str, summary: dict, frequency_hz: float) -> None:
         f"{summary['huygens_face_count']} closed Huygens faces, "
         f"{summary['termination_face_count']} termination faces"
     )
+    if "target_gain_dbi" in summary:
+        print(
+            f"Target gain     : {summary['target_gain_dbi']:.3f} dBi at "
+            f"theta {summary['target_theta_deg']:.2f} deg, "
+            f"phi {summary['target_phi_deg']:.2f} deg"
+        )
+    if "target_beamwidth_deg" in summary:
+        print(
+            f"Target HPBW     : {summary['target_beamwidth_deg']:.2f} deg; "
+            f"measured elevation {summary['elevation_beamwidth_deg']:.2f} deg, "
+            f"azimuth {summary['azimuth_beamwidth_deg']:.2f} deg"
+        )
     print(f"Antenna height  : {summary['antenna_height_m']*1e3:.2f} mm")
     print(
         f"Mesh            : {summary['mesh_nodes']} nodes, "
@@ -330,10 +386,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     source_frequency = None
+    directional_target = None
     if args.result is not None:
         source_payload = json.loads(args.result.read_text(encoding="utf-8"))
         if isinstance(source_payload, dict):
             source_frequency = source_payload.get("frequency_hz")
+            directional_target = directional_target_from_payload(source_payload)
     if args.frequency_mhz is not None:
         frequency_hz = args.frequency_mhz*1e6
     elif source_frequency is not None:
@@ -373,7 +431,11 @@ def main() -> None:
                 sweep_bandwidth_hz,
             ),
         )
-        payload["coarse"] = result_summary(coarse_result, frequency_hz)
+        payload["coarse"] = result_summary(
+            coarse_result,
+            frequency_hz,
+            directional_target,
+        )
         print_summary("coarse", payload["coarse"], frequency_hz)
 
     fine_mesh = MeshSettings(
@@ -399,7 +461,11 @@ def main() -> None:
             show_mesh=args.show_mesh,
         ),
     )
-    payload["fine"] = result_summary(fine_result, frequency_hz)
+    payload["fine"] = result_summary(
+        fine_result,
+        frequency_hz,
+        directional_target,
+    )
     print_summary("fine", payload["fine"], frequency_hz)
 
     if coarse_result is not None:
@@ -414,6 +480,10 @@ def main() -> None:
                 fine["s11_at_target_db"] - coarse["s11_at_target_db"]
             ),
         }
+        if "target_gain_dbi" in fine:
+            convergence["target_gain_delta_db"] = (
+                fine["target_gain_dbi"] - coarse["target_gain_dbi"]
+            )
         payload["convergence"] = convergence
         print("\nMESH CONVERGENCE (fine - coarse)")
         for name, value in convergence.items():

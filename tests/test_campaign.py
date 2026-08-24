@@ -51,6 +51,17 @@ from examples.optimize_gain import (
 
 
 class CampaignTests(unittest.TestCase):
+    def test_target_theta_alone_selects_directional_mode(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--target-theta", "100"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.pattern, "directional")
+        self.assertEqual(args.target_theta, 100.0)
+        self.assertEqual(args.target_phi, 0.0)
+
     def test_cli_accepts_wire_diameter_and_directional_lobe_target(self):
         with patch(
             "sys.argv",
@@ -58,8 +69,6 @@ class CampaignTests(unittest.TestCase):
                 "optimize_gain.py",
                 "--wire-diameter-mm",
                 "1.6",
-                "--pattern",
-                "directional",
                 "--target-theta",
                 "72.5",
                 "--target-phi",
@@ -101,13 +110,13 @@ class CampaignTests(unittest.TestCase):
 
     def test_beamwidth_goal_requires_directional_mode_and_valid_settings(self):
         invalid_commands = (
-            ["--target-beamwidth-deg", "60"],
             [
                 "--pattern",
                 "directional",
                 "--target-beamwidth-deg",
                 "0",
             ],
+            ["--pattern", "peak", "--target-beamwidth-deg", "60"],
             ["--beamwidth-weight", "-1"],
         )
 
@@ -115,6 +124,24 @@ class CampaignTests(unittest.TestCase):
             with (
                 self.subTest(command=command),
                 patch("sys.argv", ["optimize_gain.py", *command]),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args()
+
+    def test_explicit_non_directional_pattern_rejects_lobe_target(self):
+        for pattern in ("horizon", "peak"):
+            with (
+                self.subTest(pattern=pattern),
+                patch(
+                    "sys.argv",
+                    [
+                        "optimize_gain.py",
+                        "--pattern",
+                        pattern,
+                        "--target-theta",
+                        "100",
+                    ],
+                ),
                 self.assertRaises(SystemExit),
             ):
                 parse_args()
@@ -140,6 +167,7 @@ class CampaignTests(unittest.TestCase):
             fine = parse_args()
 
         self.assertEqual(broad.seeds, (2, 3, 4, 5))
+        self.assertEqual(broad.pattern, "horizon")
         self.assertEqual(fine.seeds, (2, 3))
         self.assertEqual(fine.confirmation_runs, 3)
         self.assertEqual(fine.s11_margin_target_db, -12.0)

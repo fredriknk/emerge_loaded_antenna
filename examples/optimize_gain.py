@@ -42,6 +42,9 @@ METRIC_FIELDS = (
     "s11_high_db",
     "worst_s11_db",
     "useful_gain_dbi",
+    "target_theta_deg",
+    "target_phi_deg",
+    "target_gain_dbi",
     "peak_gain_dbi",
     "peak_theta_deg",
     "peak_phi_deg",
@@ -1319,32 +1322,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pattern",
         choices=("horizon", "directional", "peak"),
-        default="horizon",
+        help=(
+            "gain objective; defaults to horizon unless a directional target "
+            "flag is supplied"
+        ),
     )
     parser.add_argument(
         "--target-theta",
         type=float,
-        default=90.0,
         help=(
-            "directional-mode lobe target: spherical theta in degrees "
-            "(0=+Z, 90=horizon, 180=-Z)"
+            "lobe target: spherical theta in degrees (0=+Z, 90=horizon, "
+            "180=-Z); implies --pattern directional"
         ),
     )
     parser.add_argument(
         "--target-phi",
         type=float,
-        default=0.0,
         help=(
-            "directional-mode lobe target: azimuth phi in degrees "
-            "(0=+X, 90=+Y)"
+            "lobe target: azimuth phi in degrees (0=+X, 90=+Y); implies "
+            "--pattern directional"
         ),
     )
     parser.add_argument(
         "--target-beamwidth-deg",
         type=float,
         help=(
-            "directional-mode HPBW goal in degrees for both orthogonal cuts "
-            "through the lobe target"
+            "HPBW goal in degrees for both orthogonal cuts through the lobe "
+            "target; implies --pattern directional"
         ),
     )
     parser.add_argument(
@@ -1434,6 +1438,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    directional_target_supplied = any(
+        value is not None
+        for value in (
+            args.target_theta,
+            args.target_phi,
+            args.target_beamwidth_deg,
+        )
+    )
+    if args.pattern is None:
+        args.pattern = "directional" if directional_target_supplied else "horizon"
+    elif args.pattern != "directional" and directional_target_supplied:
+        parser.error(
+            "--target-theta, --target-phi, and --target-beamwidth-deg conflict "
+            "with a non-directional --pattern"
+        )
+    if args.target_theta is None:
+        args.target_theta = 90.0
+    if args.target_phi is None:
+        args.target_phi = 0.0
     if args.seeds is None:
         args.seeds = (2, 3) if args.finetune else (2, 3, 4, 5)
     if args.skip_convergence_check and args.require_convergence:
@@ -1448,16 +1471,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-theta must be finite and between 0 and 180")
     if not np.isfinite(args.target_phi):
         parser.error("--target-phi must be finite")
-    if args.target_beamwidth_deg is not None:
-        if args.pattern != "directional":
-            parser.error("--target-beamwidth-deg requires --pattern directional")
-        if (
-            not np.isfinite(args.target_beamwidth_deg)
-            or not 0 < args.target_beamwidth_deg <= 360
-        ):
-            parser.error(
-                "--target-beamwidth-deg must be finite and between 0 and 360"
-            )
+    if args.target_beamwidth_deg is not None and (
+        not np.isfinite(args.target_beamwidth_deg)
+        or not 0 < args.target_beamwidth_deg <= 360
+    ):
+        parser.error(
+            "--target-beamwidth-deg must be finite and between 0 and 360"
+        )
     args.frequency_hz = args.frequency_mhz * 1e6
     frequency_scale = REFERENCE_DESIGN_FREQUENCY_HZ / args.frequency_hz
     if args.match_bandwidth_mhz is None:
@@ -2239,7 +2259,7 @@ def run_campaign(args: argparse.Namespace) -> None:
     print(f"Pattern target  : {args.pattern}")
     if args.pattern == "directional":
         print(
-            f"Lobe direction  : theta {args.target_theta:g} deg, "
+            f"Gain direction  : theta {args.target_theta:g} deg, "
             f"phi {args.target_phi:g} deg"
         )
     print(f"Match samples   : {low_mhz:g}, {args.frequency_mhz:g} and {high_mhz:g} MHz")
@@ -2251,10 +2271,12 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Confirmation    : {args.confirmation_runs} runs, score tolerance "
         f"{args.confirmation_score_tolerance:g}"
     )
-    print(
-        f"Pattern limits  : horizon min {args.minimum_horizon_gain_dbi:.1f} dBi, "
-        f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
-    )
+    if args.pattern == "horizon":
+        print(
+            f"Pattern limits  : horizon min "
+            f"{args.minimum_horizon_gain_dbi:.1f} dBi, "
+            f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
+        )
     if args.target_beamwidth_deg is not None:
         print(
             f"Beamwidth goal  : {args.target_beamwidth_deg:g} deg HPBW on both "

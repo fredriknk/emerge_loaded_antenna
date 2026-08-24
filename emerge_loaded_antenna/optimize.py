@@ -642,6 +642,12 @@ class RobustGainObjective:
                 "beamwidth_penalty": beamwidth_penalty,
                 "height_penalty": height_penalty,
             }
+            if self.pattern_mode == "directional":
+                metrics.update(
+                    target_theta_deg=self.target_theta_deg,
+                    target_phi_deg=self.target_phi_deg,
+                    target_gain_dbi=float(useful_gain),
+                )
             if self.target_beamwidth_deg is not None:
                 metrics.update(
                     target_beamwidth_deg=self.target_beamwidth_deg,
