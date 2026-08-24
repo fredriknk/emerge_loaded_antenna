@@ -693,6 +693,68 @@ class DesignTests(unittest.TestCase):
         self.assertEqual(record.metrics["beamwidth_error_deg"], -10.0)
         self.assertAlmostEqual(record.metrics["beamwidth_penalty"], 2.0)
 
+    def test_multi_ring_objective_optimizes_weakest_ring_and_each_beamwidth(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        rings = {
+            90.0: SimpleNamespace(
+                sampled_theta_deg=90.0,
+                min_gain_dbi=3.0,
+                p10_gain_dbi=5.0,
+                mean_gain_dbi=5.2,
+                p90_gain_dbi=6.0,
+                peak_gain_dbi=6.1,
+                ripple_p90_p10_db=1.0,
+                peak_to_null_db=3.1,
+            ),
+            130.0: SimpleNamespace(
+                sampled_theta_deg=130.0,
+                min_gain_dbi=3.0,
+                p10_gain_dbi=2.0,
+                mean_gain_dbi=2.2,
+                p90_gain_dbi=3.0,
+                peak_gain_dbi=3.1,
+                ripple_p90_p10_db=1.0,
+                peak_to_null_db=0.1,
+            ),
+        }
+        fake_result = _robust_result()
+        fake_result.azimuth_ring_metrics = lambda theta: rings[theta]
+        fake_result.azimuth_ring_beamwidth_deg = lambda theta: {
+            90.0: 60.0,
+            130.0: 90.0,
+        }[theta]
+        objective = RobustGainObjective(
+            space,
+            pattern_mode="ring",
+            target_theta_degrees=(90.0, 130.0),
+            target_beamwidth_deg=70.0,
+            beamwidth_weight=2.0,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            return_value=fake_result,
+        ):
+            score = objective((220e-3,))
+
+        record = objective.best_record
+        self.assertAlmostEqual(score, 3.0)
+        self.assertEqual(record.metrics["useful_gain_dbi"], 2.0)
+        self.assertEqual(record.metrics["ring_p10_gain_dbi"], 2.0)
+        self.assertEqual(record.metrics["ring_worst_target_theta_deg"], 130.0)
+        self.assertEqual(record.metrics["ring_0_p10_gain_dbi"], 5.0)
+        self.assertEqual(record.metrics["ring_1_p10_gain_dbi"], 2.0)
+        self.assertEqual(record.metrics["ring_0_beamwidth_deg"], 60.0)
+        self.assertEqual(record.metrics["ring_1_beamwidth_deg"], 90.0)
+        self.assertAlmostEqual(
+            record.metrics["ring_beamwidth_rms_error_deg"],
+            np.sqrt(250.0),
+        )
+        self.assertAlmostEqual(record.metrics["beamwidth_penalty"], 5.0)
+
     def test_robust_objective_confirms_and_quarantines_new_incumbents(self):
         space = DesignSpace(
             AntennaDesign(),
@@ -822,6 +884,12 @@ class DesignTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "weights"):
             RobustGainObjective(space, beamwidth_weight=-1.0)
+        with self.assertRaisesRegex(ValueError, "require ring mode"):
+            RobustGainObjective(
+                space,
+                pattern_mode="directional",
+                target_theta_degrees=(90.0, 130.0),
+            )
 
     def test_robust_objective_confirms_new_best_feasible_candidate(self):
         space = DesignSpace(

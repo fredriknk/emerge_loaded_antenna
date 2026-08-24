@@ -92,6 +92,35 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("BW 48 deg (goal 50 deg)", text)
         self.assertNotIn("Horizon", text)
 
+    def test_progress_goal_text_reports_every_requested_ring(self):
+        record = EvaluationRecord(
+            (1.0,),
+            -2.0,
+            -11.0,
+            5.0,
+            metrics={
+                "ring_p10_gain_dbi": 1.25,
+                "ring_0_sampled_theta_deg": 90.0,
+                "ring_0_p10_gain_dbi": 3.5,
+                "ring_1_sampled_theta_deg": 130.0,
+                "ring_1_p10_gain_dbi": 1.25,
+            },
+        )
+
+        text = progress_goal_text(
+            record,
+            {
+                "objective": {
+                    "pattern_mode": "ring",
+                    "target_theta_degrees": [90.0, 130.0],
+                }
+            },
+        )
+
+        self.assertIn("90 deg: 3.50", text)
+        self.assertIn("130 deg: 1.25", text)
+        self.assertIn("worst 1.25 dBi", text)
+
     def test_progress_goal_text_follows_directional_and_peak_modes(self):
         directional = EvaluationRecord(
             (1.0,),
@@ -305,7 +334,36 @@ class CampaignTests(unittest.TestCase):
 
         self.assertEqual(args.pattern, "ring")
         self.assertEqual(args.target_theta, 100.0)
+        self.assertEqual(args.target_thetas, (100.0,))
         self.assertEqual(args.target_phi, 0.0)
+
+    def test_theta_alias_accepts_multiple_omnidirectional_rings(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--theta", "90", "130"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.pattern, "ring")
+        self.assertEqual(args.target_theta, 90.0)
+        self.assertEqual(args.target_thetas, (90.0, 130.0))
+
+    def test_multiple_theta_values_reject_directional_phi(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--theta",
+                    "90",
+                    "130",
+                    "--target-phi",
+                    "20",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
 
     def test_target_phi_selects_single_direction_mode(self):
         with patch(
@@ -1595,6 +1653,9 @@ class CampaignTests(unittest.TestCase):
             self.assertTrue(
                 all(item["beamwidth_weight"] == 1.5 for item in objective_options)
             )
+            self.assertTrue(
+                all(item["target_theta_degrees"] == (70.0,) for item in objective_options)
+            )
             self.assertEqual(
                 [item["coil_count"] for item in leaderboard],
                 [3, 1, 0],
@@ -1635,6 +1696,10 @@ class CampaignTests(unittest.TestCase):
                 70.0,
             )
             self.assertEqual(
+                best["simulation"]["objective"]["target_theta_degrees"],
+                [70.0],
+            )
+            self.assertEqual(
                 best["simulation"]["objective"]["target_phi_deg"],
                 25.0,
             )
@@ -1650,6 +1715,76 @@ class CampaignTests(unittest.TestCase):
                 best["simulation"]["search_bounds"]["maximum_height_source"],
                 "automatic",
             )
+
+    def test_campaign_records_multiple_ring_targets_and_csv_metrics(self):
+        objective_options = []
+
+        class FakeObjective:
+            def __init__(self, space, *, on_evaluation, **kwargs):
+                objective_options.append(kwargs)
+                record = EvaluationRecord(
+                    tuple(space.initial_vector),
+                    -1.0,
+                    -12.0,
+                    3.0,
+                    metrics={
+                        "worst_s11_db": -11.0,
+                        "ring_p10_gain_dbi": 1.0,
+                        "ring_0_p10_gain_dbi": 2.0,
+                        "ring_1_p10_gain_dbi": 1.0,
+                    },
+                )
+                self.best_record = record
+                self.history = [record]
+                on_evaluation(record)
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "--theta",
+                    "90",
+                    "130",
+                    "--seeds",
+                    "2",
+                    "--maxiter",
+                    "0",
+                    "--skip-convergence-check",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+            with (
+                patch(
+                    "examples.optimize_gain.RobustGainObjective",
+                    FakeObjective,
+                ),
+                patch(
+                    "examples.optimize_gain.differential_evolution",
+                    return_value=SimpleNamespace(success=True, message="fake"),
+                ),
+            ):
+                run_campaign(args)
+
+            best = json.loads(
+                (output / "campaign_best.json").read_text(encoding="utf-8")
+            )
+            with (output / "evaluations.csv").open(encoding="utf-8") as csv_file:
+                fieldnames = csv.DictReader(csv_file).fieldnames
+
+        self.assertEqual(
+            objective_options[0]["target_theta_degrees"],
+            (90.0, 130.0),
+        )
+        self.assertEqual(
+            best["simulation"]["objective"]["target_theta_degrees"],
+            [90.0, 130.0],
+        )
+        self.assertIn("ring_0_p10_gain_dbi", fieldnames)
+        self.assertIn("ring_1_p10_gain_dbi", fieldnames)
 
     def test_strict_and_skipped_convergence_flags_conflict(self):
         with (

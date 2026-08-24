@@ -3,14 +3,22 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from emerge_loaded_antenna import AntennaDesign, MeshSettings
+import numpy as np
+
+from emerge_loaded_antenna import (
+    AntennaDesign,
+    MeshSettings,
+    OpenRegionSettings,
+)
 from examples.verify_best import (
     export_fabrication_artifacts,
     options,
     parse_args,
     pattern_target_from_payload,
+    result_summary,
     verification_quality,
 )
 
@@ -35,6 +43,7 @@ class VerifyBestTests(unittest.TestCase):
             {
                 "mode": "directional",
                 "theta_deg": 100.0,
+                "theta_degrees": (100.0,),
                 "phi_deg": 20.0,
                 "beamwidth_deg": 55.0,
             },
@@ -64,10 +73,108 @@ class VerifyBestTests(unittest.TestCase):
             {
                 "mode": "ring",
                 "theta_deg": 100.0,
+                "theta_degrees": (100.0,),
                 "phi_deg": None,
                 "beamwidth_deg": 50.0,
             },
         )
+
+    def test_multiple_ring_targets_are_recovered_from_campaign_metadata(self):
+        target = pattern_target_from_payload(
+            {
+                "simulation": {
+                    "objective": {
+                        "pattern_mode": "ring",
+                        "target_theta_deg": 90.0,
+                        "target_theta_degrees": [90.0, 130.0],
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(target["theta_deg"], 90.0)
+        self.assertEqual(target["theta_degrees"], (90.0, 130.0))
+        self.assertIsNone(target["phi_deg"])
+
+    def test_verification_summary_reports_each_ring_and_the_weakest(self):
+        rings = {
+            90.0: SimpleNamespace(
+                sampled_theta_deg=90.0,
+                min_gain_dbi=3.0,
+                p10_gain_dbi=4.0,
+                mean_gain_dbi=4.2,
+                p90_gain_dbi=5.0,
+                peak_gain_dbi=5.2,
+                ripple_p90_p10_db=1.0,
+                peak_to_null_db=2.2,
+            ),
+            130.0: SimpleNamespace(
+                sampled_theta_deg=130.0,
+                min_gain_dbi=1.0,
+                p10_gain_dbi=2.0,
+                mean_gain_dbi=2.2,
+                p90_gain_dbi=3.5,
+                peak_gain_dbi=3.8,
+                ripple_p90_p10_db=1.5,
+                peak_to_null_db=2.8,
+            ),
+        }
+        pattern = SimpleNamespace(
+            peak_gain_dbi=5.2,
+            peak_theta_deg=90.0,
+            peak_phi_deg=0.0,
+            peak_elevation_deg=0.0,
+            horizon_min_gain_dbi=3.0,
+            horizon_p10_gain_dbi=4.0,
+            horizon_mean_gain_dbi=4.2,
+            horizon_peak_gain_dbi=5.2,
+            horizon_ripple_p90_p10_db=1.0,
+            horizon_peak_to_null_db=2.2,
+        )
+        result = SimpleNamespace(
+            farfield_metrics=pattern,
+            s11_db_at=lambda frequency: -12.0,
+            s11_db=np.asarray((-12.0, -11.0, -10.5)),
+            frequencies=np.asarray((863e6, 868e6, 873e6)),
+            antenna_height=0.5,
+            artifacts=SimpleNamespace(
+                mesh_nodes=10,
+                mesh_elements=20,
+                volume_elements=15,
+                farfield_selection=SimpleNamespace(tags=(1, 2)),
+                termination_selection=None,
+                outer_boundary_tags=(3, 4),
+            ),
+            options=SimpleNamespace(
+                open_region=OpenRegionSettings(),
+                mesh=MeshSettings(),
+            ),
+            azimuth_ring_metrics=lambda theta: rings[theta],
+            azimuth_ring_beamwidth_deg=lambda theta: {
+                90.0: 50.0,
+                130.0: 70.0,
+            }[theta],
+        )
+
+        summary = result_summary(
+            result,
+            868e6,
+            {
+                "mode": "ring",
+                "theta_deg": 90.0,
+                "theta_degrees": (90.0, 130.0),
+                "phi_deg": None,
+                "beamwidth_deg": 60.0,
+            },
+        )
+
+        self.assertEqual(summary["ring_p10_gain_dbi"], 2.0)
+        self.assertEqual(summary["ring_worst_target_theta_deg"], 130.0)
+        self.assertEqual(
+            [ring["p10_gain_dbi"] for ring in summary["rings"]],
+            [4.0, 2.0],
+        )
+        self.assertEqual(summary["ring_beamwidths_deg"], [50.0, 70.0])
 
     def test_verification_quality_checks_matching_and_mesh_agreement(self):
         quality = verification_quality(
@@ -75,7 +182,7 @@ class VerifyBestTests(unittest.TestCase):
                 "fine": {
                     "worst_s11_db": -9.5,
                     "target_beamwidth_deg": 50.0,
-                    "ring_beamwidth_deg": 53.0,
+                    "ring_beamwidths_deg": [53.0, 46.0],
                 },
                 "convergence": {
                     "peak_gain_delta_db": 0.2,
@@ -92,7 +199,14 @@ class VerifyBestTests(unittest.TestCase):
         self.assertEqual(quality["status"], "warning")
         self.assertFalse(quality["checks"]["fine_worst_s11"]["passed"])
         self.assertFalse(quality["checks"]["coarse_fine_agreement"]["passed"])
-        self.assertEqual(quality["observations"]["beamwidth"]["error_deg"], 3.0)
+        self.assertEqual(
+            quality["observations"]["beamwidth"]["errors_deg"],
+            [3.0, -4.0],
+        )
+        self.assertEqual(
+            quality["observations"]["beamwidth"]["rms_error_deg"],
+            2.5*np.sqrt(2),
+        )
 
     def test_verification_quality_warns_for_uncertified_open_region(self):
         quality = verification_quality(

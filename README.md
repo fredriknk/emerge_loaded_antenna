@@ -719,14 +719,18 @@ Choose one of four pattern modes:
 | Mode | Useful-gain term | Additional pattern behavior |
 |---|---|---|
 | `horizon` | Horizon P10 gain | Penalizes insufficient horizon minimum and excess P90-P10 ripple. |
-| `ring` | P10 gain around all phi at requested theta | Applies the horizon minimum/ripple objective to a conical azimuth ring. |
+| `ring` | Worst P10 gain among all requested theta rings | Applies the minimum/ripple objective to every conical azimuth ring. |
 | `directional` | Gain at requested theta/phi | Optionally targets HPBW on two orthogonal cuts. |
 | `peak` | Global peak gain | No directional or horizon-shape penalty. |
 
 With no pattern flags, the optimizer uses the existing horizon ring at theta
-90 degrees. Supplying only `--target-theta` selects `ring` mode at that theta
-and optimizes every phi equally. Supplying `--target-phi` selects a single
-`directional` coordinate. Explicit conflicting combinations are rejected.
+90 degrees. Supplying one or more values to `--target-theta` (or its shorter
+alias `--theta`) selects `ring` mode and optimizes every phi equally at every
+requested theta. The useful-gain term is the weakest ring's P10, so a strong
+ring cannot hide a weak one. Minimum-gain and ripple penalties are evaluated on
+every ring and averaged. Supplying `--target-phi` selects a single
+`directional` coordinate, so it cannot be combined with multiple theta values.
+Explicit conflicting combinations are rejected.
 
 Omnidirectional conical-ring example:
 
@@ -739,6 +743,18 @@ Omnidirectional conical-ring example:
 This maximizes azimuthal P10 gain at theta 100 degrees and penalizes weak
 azimuths and excess P90-P10 ripple around that entire ring. Phi is deliberately
 unspecified.
+
+Multiple omnidirectional rings use space-separated theta values:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --theta 90 130 `
+    --hours 8
+```
+
+This maximizes the lower of the theta-90 and theta-130 ring P10 gains. Live
+progress, CSV metrics, campaign JSON, and verification output report both rings
+and identify the current bottleneck.
 
 Directional example:
 
@@ -770,8 +786,9 @@ Add a half-power beamwidth goal with:
 For directional mode, the same target is applied to the two orthogonal
 great-circle cuts through the requested lobe and their errors are combined as
 RMS. For ring mode, beamwidth is measured in theta/elevation from the
-azimuthal-P10 profile, so the entire ring must retain the requested width. The
-penalty is:
+azimuthal-P10 profile, so the entire ring must retain the requested width. With
+multiple rings, the same HPBW goal is applied to every ring and their squared
+errors are averaged. The penalty is:
 
 ```text
 beamwidth_weight * mean((beamwidth_error_degrees / 10)^2)
@@ -888,10 +905,10 @@ metrics, numerical settings, fixed wire diameter, and candidate/simulation
 counts. It can be passed directly to `--warm-start`, `verify_best.py`,
 `check_open_region.py`, or `load_design()`.
 
-Live progress follows the selected objective: horizon P10, requested-theta ring
-P10, requested theta/phi directional gain, or peak gain. It also shows the S11
-limit and any active beamwidth goal instead of reporting horizon defaults for
-every mode.
+Live progress follows the selected objective: horizon P10, every requested
+theta-ring P10 plus the worst value, requested theta/phi directional gain, or
+peak gain. It also shows the S11 limit and any active beamwidth goal instead of
+reporting horizon defaults for every mode.
 
 ### Optimizer option reference
 
@@ -943,7 +960,7 @@ Pattern and objective:
 | Option | Default | Meaning |
 |---|---:|---|
 | `--pattern` | `horizon` | `horizon`, `ring`, `directional`, or `peak`. |
-| `--target-theta` | `90` degrees | Omnidirectional ring angle, or directional polar angle when phi is supplied. |
+| `--target-theta`, `--theta` | `90` degrees | One or more space-separated omnidirectional ring angles; one value can also be a directional polar angle when phi is supplied. |
 | `--target-phi` | unspecified | Optional azimuth; supplying it selects a single directional target. |
 | `--target-beamwidth-deg` | disabled | Ring elevation HPBW, or both directional cuts when phi is supplied. |
 | `--beamwidth-weight` | `1` | Beamwidth-error penalty weight. |
@@ -1062,8 +1079,8 @@ Verification output includes:
 - `horizon_gain.png`;
 - `principal_plane_gain.png`.
 
-For a non-horizon ring objective, verification also writes
-`target_ring_gain.png` at the requested theta.
+For a ring objective, verification also writes `target_ring_gain.png` with all
+requested theta rings overlaid.
 
 With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
 verification result, so the sheet includes dimensions, the verified S11 sweep,

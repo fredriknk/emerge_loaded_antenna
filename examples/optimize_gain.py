@@ -57,6 +57,11 @@ METRIC_FIELDS = (
     "ring_ripple_db",
     "ring_peak_to_null_db",
     "ring_beamwidth_deg",
+    "ring_target_count",
+    "ring_worst_target_theta_deg",
+    "ring_minimum_across_targets_dbi",
+    "ring_maximum_ripple_across_targets_db",
+    "ring_beamwidth_rms_error_deg",
     "peak_gain_dbi",
     "peak_theta_deg",
     "peak_phi_deg",
@@ -1112,7 +1117,50 @@ def progress_goal_text(
     mode = objective.get("pattern_mode", "horizon")
     metrics = record.metrics
     if mode == "ring":
-        target_theta = float(objective.get("target_theta_deg", 90.0))
+        raw_targets = objective.get("target_theta_degrees")
+        target_thetas = (
+            tuple(float(value) for value in raw_targets)
+            if isinstance(raw_targets, (list, tuple)) and raw_targets
+            else (float(objective.get("target_theta_deg", 90.0)),)
+        )
+        if len(target_thetas) > 1:
+            labels = []
+            for index, target_theta in enumerate(target_thetas):
+                sampled_theta = float(
+                    metrics.get(
+                        f"ring_{index}_sampled_theta_deg",
+                        target_theta,
+                    )
+                )
+                sampled_label = (
+                    f"{target_theta:g}->{sampled_theta:g} deg"
+                    if sampled_theta != target_theta
+                    else f"{target_theta:g} deg"
+                )
+                labels.append(
+                    f"{sampled_label}: "
+                    f"{metrics.get(f'ring_{index}_p10_gain_dbi', float('nan')):.2f}"
+                )
+            text = (
+                "Ring P10s ["
+                + ", ".join(labels)
+                + "] dBi | worst "
+                + f"{metrics.get('ring_p10_gain_dbi', float('nan')):.2f} dBi"
+            )
+            beamwidth_goal = objective.get("target_beamwidth_deg")
+            if beamwidth_goal is not None:
+                widths = [
+                    metrics.get(f"ring_{index}_beamwidth_deg")
+                    for index in range(len(target_thetas))
+                ]
+                if all(width is not None for width in widths):
+                    text += (
+                        " | BWs "
+                        + "/".join(f"{float(width):g}" for width in widths)
+                        + f" deg (goal {float(beamwidth_goal):g} each)"
+                    )
+            return text
+        target_theta = target_thetas[0]
         sampled_theta = float(
             metrics.get("ring_sampled_theta_deg", target_theta)
         )
@@ -1174,6 +1222,7 @@ class CampaignProgress:
         allowed_existing: tuple[Path, ...] = (),
         maximum_s11_db: float = -10.0,
         stage: str = "optimization",
+        additional_metric_fields: tuple[str, ...] = (),
     ):
         self.output = output
         self.total = total
@@ -1219,6 +1268,9 @@ class CampaignProgress:
                 f"Campaign output already contains evaluations.csv: {output}. "
                 "Choose a new --output directory; campaign resume is not supported."
             ) from error
+        extra_metrics = tuple(
+            name for name in additional_metric_fields if name not in METRIC_FIELDS
+        )
         fields = [
             "stage",
             "evaluation",
@@ -1234,6 +1286,7 @@ class CampaignProgress:
             "s11_db",
             "error",
             *METRIC_FIELDS,
+            *extra_metrics,
             *variable_names,
         ]
         self.writer = csv.DictWriter(
@@ -1622,10 +1675,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-theta",
+        "--theta",
+        dest="target_theta",
         type=float,
+        nargs="+",
         help=(
-            "lobe target: spherical theta in degrees (0=+Z, 90=horizon, "
-            "180=-Z); selects an omnidirectional ring unless phi is supplied"
+            "one or more spherical theta angles in degrees (0=+Z, "
+            "90=horizon, 180=-Z); multiple angles optimize the weakest "
+            "omnidirectional ring and cannot be combined with phi"
         ),
     )
     parser.add_argument(
@@ -1755,8 +1812,19 @@ def parse_args() -> argparse.Namespace:
             "--target-theta, --target-phi, and --target-beamwidth-deg conflict "
             f"with --pattern {args.pattern}"
         )
-    if args.target_theta is None:
-        args.target_theta = 90.0
+    args.target_thetas = tuple(
+        dict.fromkeys(
+            [90.0]
+            if args.target_theta is None
+            else (float(value) for value in args.target_theta)
+        )
+    )
+    args.target_theta = args.target_thetas[0]
+    if len(args.target_thetas) > 1 and args.pattern != "ring":
+        parser.error(
+            "multiple --theta values require ring mode and cannot be combined "
+            "with --target-phi"
+        )
     if args.target_phi is None:
         args.target_phi = 0.0
     if args.seeds is None:
@@ -1790,8 +1858,11 @@ def parse_args() -> argparse.Namespace:
         not np.isfinite(args.wire_diameter_mm) or args.wire_diameter_mm <= 0
     ):
         parser.error("--wire-diameter-mm must be finite and positive")
-    if not np.isfinite(args.target_theta) or not 0 <= args.target_theta <= 180:
-        parser.error("--target-theta must be finite and between 0 and 180")
+    if any(
+        not np.isfinite(value) or not 0 <= value <= 180
+        for value in args.target_thetas
+    ):
+        parser.error("--theta values must be finite and between 0 and 180")
     if not np.isfinite(args.target_phi):
         parser.error("--target-phi must be finite")
     beamwidth_limit = 180.0 if args.pattern == "ring" else 360.0
@@ -2457,6 +2528,11 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     frequency_hz = args.frequency_hz
     args.finetune = bool(getattr(args, "finetune", False))
     args.lock_coils = bool(getattr(args, "lock_coils", False))
+    args.target_thetas = tuple(
+        float(value)
+        for value in getattr(args, "target_thetas", (args.target_theta,))
+    )
+    args.target_theta = args.target_thetas[0]
     if getattr(args, "seeds", None) is None:
         args.seeds = random_seeds(
             DEFAULT_FINE_SEED_COUNT
@@ -2532,6 +2608,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         "objective": {
             "pattern_mode": args.pattern,
             "target_theta_deg": args.target_theta,
+            "target_theta_degrees": list(args.target_thetas),
             "target_phi_deg": args.target_phi,
             "maximum_s11_db": args.s11_limit_db,
             "mismatch_weight": args.mismatch_weight,
@@ -2679,6 +2756,24 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     variable_names = tuple(
         dict.fromkeys(name for schedule in schedules for name in schedule.space.names)
     )
+    ring_metric_fields = (
+        tuple(
+            field
+            for index in range(len(args.target_thetas))
+            for field in (
+                f"ring_{index}_target_theta_deg",
+                f"ring_{index}_sampled_theta_deg",
+                f"ring_{index}_min_gain_dbi",
+                f"ring_{index}_p10_gain_dbi",
+                f"ring_{index}_mean_gain_dbi",
+                f"ring_{index}_ripple_db",
+                f"ring_{index}_beamwidth_deg",
+                f"ring_{index}_beamwidth_error_deg",
+            )
+        )
+        if args.pattern == "ring"
+        else ()
+    )
     total = len(args.seeds) * sum(
         schedule.evaluations_per_run for schedule in schedules
     )
@@ -2699,6 +2794,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         ),
         maximum_s11_db=args.s11_limit_db,
         stage=getattr(args, "pipeline_stage", "optimization"),
+        additional_metric_fields=ring_metric_fields,
     )
     write_json(
         args.output / "campaign_seeds.json",
@@ -2721,7 +2817,16 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
             f"phi {args.target_phi:g} deg"
         )
     elif args.pattern == "ring":
-        print(f"Gain ring       : theta {args.target_theta:g} deg, all phi angles")
+        if len(args.target_thetas) == 1:
+            print(
+                f"Gain ring       : theta {args.target_theta:g} deg, all phi angles"
+            )
+        else:
+            theta_text = ", ".join(f"{value:g}" for value in args.target_thetas)
+            print(
+                f"Gain rings      : theta {theta_text} deg, all phi angles; "
+                "maximize the weakest ring P10"
+            )
     print(f"Match samples   : {low_mhz:g}, {args.frequency_mhz:g} and {high_mhz:g} MHz")
     print(
         f"Match objective : limit {args.s11_limit_db:g} dB; margin reward to "
@@ -2888,6 +2993,7 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                     target_frequency=frequency_hz,
                     pattern_mode=args.pattern,
                     target_theta_deg=args.target_theta,
+                    target_theta_degrees=args.target_thetas,
                     target_phi_deg=args.target_phi,
                     target_beamwidth_deg=args.target_beamwidth_deg,
                     beamwidth_weight=args.beamwidth_weight,
@@ -3121,7 +3227,12 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     if leaderboard:
         useful_label, useful_key = {
             "horizon": ("H10", "horizon_p10_gain_dbi"),
-            "ring": ("Ring P10", "ring_p10_gain_dbi"),
+            "ring": (
+                "Worst ring P10"
+                if len(args.target_thetas) > 1
+                else "Ring P10",
+                "ring_p10_gain_dbi",
+            ),
             "directional": ("Target", "target_gain_dbi"),
             "peak": ("Peak", "peak_gain_dbi"),
         }[args.pattern]
@@ -3154,14 +3265,26 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         )
         print(f"Worst-band S11  : {metrics.get('worst_s11_db', float('nan')):.3f} dB")
         if args.pattern == "ring":
-            print(
-                f"Ring P10        : "
-                f"{metrics.get('ring_p10_gain_dbi', float('nan')):.3f} dBi"
-            )
-            print(
-                f"Ring minimum    : "
-                f"{metrics.get('ring_min_gain_dbi', float('nan')):.3f} dBi"
-            )
+            if len(args.target_thetas) == 1:
+                print(
+                    f"Ring P10        : "
+                    f"{metrics.get('ring_p10_gain_dbi', float('nan')):.3f} dBi"
+                )
+                print(
+                    f"Ring minimum    : "
+                    f"{metrics.get('ring_min_gain_dbi', float('nan')):.3f} dBi"
+                )
+            else:
+                for index, theta_deg in enumerate(args.target_thetas):
+                    print(
+                        f"Ring {theta_deg:g} P10   : "
+                        f"{metrics.get(f'ring_{index}_p10_gain_dbi', float('nan')):.3f} "
+                        "dBi"
+                    )
+                print(
+                    "Worst ring P10  : "
+                    f"{metrics.get('ring_p10_gain_dbi', float('nan')):.3f} dBi"
+                )
         elif args.pattern == "directional":
             print(
                 f"Target gain     : "

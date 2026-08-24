@@ -368,11 +368,11 @@ class RobustGainObjective:
     """Optimize useful gain with broadband match and pattern constraints.
 
     ``pattern_mode="horizon"`` maximizes the 10th-percentile azimuth gain at
-    zero elevation. ``"ring"`` applies the same robust azimuth objective at a
-    requested theta and can target its elevation HPBW. ``"directional"``
-    maximizes one requested theta/phi direction and can target the HPBW of both
-    orthogonal cuts through it, while ``"peak"`` retains the original
-    unconstrained behavior.
+    zero elevation. ``"ring"`` applies the same robust azimuth objective at
+    one or more requested theta values, maximizing the worst ring, and can
+    target their elevation HPBW. ``"directional"`` maximizes one requested
+    theta/phi direction and can target the HPBW of both orthogonal cuts through
+    it, while ``"peak"`` retains the original unconstrained behavior.
     """
 
     def __init__(
@@ -383,6 +383,7 @@ class RobustGainObjective:
             "horizon", "ring", "directional", "peak"
         ] = "horizon",
         target_theta_deg: float = 90.0,
+        target_theta_degrees: Sequence[float] | None = None,
         target_phi_deg: float = 0.0,
         target_beamwidth_deg: float | None = None,
         beamwidth_weight: float = 1.0,
@@ -406,8 +407,25 @@ class RobustGainObjective:
     ):
         if pattern_mode not in {"horizon", "ring", "directional", "peak"}:
             raise ValueError("invalid pattern_mode")
-        if not 0 <= target_theta_deg <= 180:
-            raise ValueError("target_theta_deg must be between zero and 180")
+        theta_values = tuple(
+            dict.fromkeys(
+                float(value)
+                for value in (
+                    (target_theta_deg,)
+                    if target_theta_degrees is None
+                    else target_theta_degrees
+                )
+            )
+        )
+        if not theta_values:
+            raise ValueError("provide at least one target theta")
+        if any(
+            not np.isfinite(value) or not 0 <= value <= 180
+            for value in theta_values
+        ):
+            raise ValueError("target theta values must be between zero and 180")
+        if len(theta_values) > 1 and pattern_mode != "ring":
+            raise ValueError("multiple target theta values require ring mode")
         if not np.isfinite(target_phi_deg):
             raise ValueError("target_phi_deg must be finite")
         if target_beamwidth_deg is not None:
@@ -465,7 +483,8 @@ class RobustGainObjective:
         self.space = space
         self.target_frequency = target_frequency
         self.pattern_mode = pattern_mode
-        self.target_theta_deg = target_theta_deg
+        self.target_theta_degrees = theta_values
+        self.target_theta_deg = theta_values[0]
         self.target_phi_deg = target_phi_deg
         self.target_beamwidth_deg = target_beamwidth_deg
         self.beamwidth_weight = beamwidth_weight
@@ -583,28 +602,53 @@ class RobustGainObjective:
                     + self.null_weight*null_deficit**2
                 )
             elif self.pattern_mode == "ring":
-                ring = result.azimuth_ring_metrics(self.target_theta_deg)
-                useful_gain = ring.p10_gain_dbi
-                ripple_excess = max(
-                    0.0,
-                    ring.ripple_p90_p10_db
-                    - self.maximum_horizon_ripple_db,
+                rings = tuple(
+                    result.azimuth_ring_metrics(theta_deg)
+                    for theta_deg in self.target_theta_degrees
                 )
-                null_deficit = max(
-                    0.0,
-                    self.minimum_horizon_gain_dbi - ring.min_gain_dbi,
+                ring_p10_values = np.asarray(
+                    [candidate.p10_gain_dbi for candidate in rings],
+                    dtype=float,
                 )
-                pattern_penalty = (
-                    self.ripple_weight*ripple_excess**2
-                    + self.null_weight*null_deficit**2
-                )
-                if self.target_beamwidth_deg is not None:
-                    ring_beamwidth = result.azimuth_ring_beamwidth_deg(
-                        self.target_theta_deg
+                worst_ring_index = int(np.argmin(ring_p10_values))
+                ring = rings[worst_ring_index]
+                useful_gain = float(ring_p10_values[worst_ring_index])
+                ring_pattern_penalties = []
+                for candidate in rings:
+                    ripple_excess = max(
+                        0.0,
+                        candidate.ripple_p90_p10_db
+                        - self.maximum_horizon_ripple_db,
                     )
-                    beamwidth_error = ring_beamwidth - self.target_beamwidth_deg
+                    null_deficit = max(
+                        0.0,
+                        self.minimum_horizon_gain_dbi
+                        - candidate.min_gain_dbi,
+                    )
+                    ring_pattern_penalties.append(
+                        self.ripple_weight*ripple_excess**2
+                        + self.null_weight*null_deficit**2
+                    )
+                pattern_penalty = float(np.mean(ring_pattern_penalties))
+                if self.target_beamwidth_deg is not None:
+                    ring_beamwidths = tuple(
+                        result.azimuth_ring_beamwidth_deg(theta_deg)
+                        for theta_deg in self.target_theta_degrees
+                    )
+                    beamwidth_errors = np.asarray(
+                        [
+                            width - self.target_beamwidth_deg
+                            for width in ring_beamwidths
+                        ],
+                        dtype=float,
+                    )
+                    beamwidth_error = (
+                        float(beamwidth_errors[0])
+                        if len(beamwidth_errors) == 1
+                        else float(np.sqrt(np.mean(beamwidth_errors**2)))
+                    )
                     beamwidth_penalty = self.beamwidth_weight*float(
-                        (beamwidth_error/10.0)**2
+                        np.mean((beamwidth_errors/10.0)**2)
                     )
             elif self.pattern_mode == "directional":
                 useful_gain = result.gain_db_at(
@@ -674,7 +718,11 @@ class RobustGainObjective:
             }
             if self.pattern_mode == "ring":
                 metrics.update(
-                    target_theta_deg=self.target_theta_deg,
+                    target_theta_deg=self.target_theta_degrees[worst_ring_index],
+                    ring_target_count=float(len(rings)),
+                    ring_worst_target_theta_deg=(
+                        self.target_theta_degrees[worst_ring_index]
+                    ),
                     ring_sampled_theta_deg=ring.sampled_theta_deg,
                     ring_min_gain_dbi=ring.min_gain_dbi,
                     ring_p10_gain_dbi=ring.p10_gain_dbi,
@@ -683,7 +731,36 @@ class RobustGainObjective:
                     ring_peak_gain_dbi=ring.peak_gain_dbi,
                     ring_ripple_db=ring.ripple_p90_p10_db,
                     ring_peak_to_null_db=ring.peak_to_null_db,
+                    ring_minimum_across_targets_dbi=min(
+                        candidate.min_gain_dbi for candidate in rings
+                    ),
+                    ring_maximum_ripple_across_targets_db=max(
+                        candidate.ripple_p90_p10_db for candidate in rings
+                    ),
                 )
+                for index, (theta_deg, candidate) in enumerate(
+                    zip(self.target_theta_degrees, rings, strict=True)
+                ):
+                    metrics.update(
+                        {
+                            f"ring_{index}_target_theta_deg": theta_deg,
+                            f"ring_{index}_sampled_theta_deg": (
+                                candidate.sampled_theta_deg
+                            ),
+                            f"ring_{index}_min_gain_dbi": (
+                                candidate.min_gain_dbi
+                            ),
+                            f"ring_{index}_p10_gain_dbi": (
+                                candidate.p10_gain_dbi
+                            ),
+                            f"ring_{index}_mean_gain_dbi": (
+                                candidate.mean_gain_dbi
+                            ),
+                            f"ring_{index}_ripple_db": (
+                                candidate.ripple_p90_p10_db
+                            ),
+                        }
+                    )
             elif self.pattern_mode == "directional":
                 metrics.update(
                     target_theta_deg=self.target_theta_deg,
@@ -694,9 +771,19 @@ class RobustGainObjective:
                 if self.pattern_mode == "ring":
                     metrics.update(
                         target_beamwidth_deg=self.target_beamwidth_deg,
-                        ring_beamwidth_deg=ring_beamwidth,
+                        ring_beamwidth_deg=ring_beamwidths[worst_ring_index],
                         beamwidth_error_deg=beamwidth_error,
+                        ring_beamwidth_rms_error_deg=float(
+                            np.sqrt(np.mean(beamwidth_errors**2))
+                        ),
                     )
+                    for index, (width, error) in enumerate(
+                        zip(ring_beamwidths, beamwidth_errors, strict=True)
+                    ):
+                        metrics[f"ring_{index}_beamwidth_deg"] = width
+                        metrics[f"ring_{index}_beamwidth_error_deg"] = float(
+                            error
+                        )
                 else:
                     metrics.update(
                         target_beamwidth_deg=self.target_beamwidth_deg,

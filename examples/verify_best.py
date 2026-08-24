@@ -48,9 +48,16 @@ def pattern_target_from_payload(payload: object) -> dict | None:
     mode = objective.get("pattern_mode")
     if mode not in {"ring", "directional"}:
         return None
+    raw_thetas = objective.get("target_theta_degrees")
+    theta_degrees = (
+        tuple(float(value) for value in raw_thetas)
+        if isinstance(raw_thetas, (list, tuple)) and raw_thetas
+        else (float(objective.get("target_theta_deg", 90.0)),)
+    )
     return {
         "mode": mode,
-        "theta_deg": float(objective.get("target_theta_deg", 90.0)),
+        "theta_deg": theta_degrees[0],
+        "theta_degrees": theta_degrees,
         "phi_deg": (
             float(objective.get("target_phi_deg", 0.0))
             if mode == "directional"
@@ -110,7 +117,17 @@ def verification_quality(
     observations = {}
     if "target_beamwidth_deg" in fine:
         target = float(fine["target_beamwidth_deg"])
-        if "ring_beamwidth_deg" in fine:
+        if "ring_beamwidths_deg" in fine:
+            widths = [float(value) for value in fine["ring_beamwidths_deg"]]
+            observations["beamwidth"] = {
+                "target_deg": target,
+                "rings_deg": widths,
+                "errors_deg": [width-target for width in widths],
+                "rms_error_deg": float(
+                    np.sqrt(np.mean((np.asarray(widths)-target)**2))
+                ),
+            }
+        elif "ring_beamwidth_deg" in fine:
             observations["beamwidth"] = {
                 "target_deg": target,
                 "ring_deg": float(fine["ring_beamwidth_deg"]),
@@ -172,11 +189,47 @@ def result_summary(
         "s11_db": result.s11_db.tolist(),
     }
     if pattern_target is not None:
-        theta_deg = pattern_target["theta_deg"]
+        theta_degrees = tuple(
+            pattern_target.get(
+                "theta_degrees",
+                (pattern_target["theta_deg"],),
+            )
+        )
+        theta_deg = float(theta_degrees[0])
         summary["target_theta_deg"] = theta_deg
+        summary["target_theta_degrees"] = list(theta_degrees)
         if pattern_target["mode"] == "ring":
-            ring = result.azimuth_ring_metrics(theta_deg)
+            rings = [
+                result.azimuth_ring_metrics(float(target_theta))
+                for target_theta in theta_degrees
+            ]
+            worst_index = int(
+                np.argmin([ring.p10_gain_dbi for ring in rings])
+            )
+            ring = rings[worst_index]
+            ring_summaries = [
+                {
+                    "target_theta_deg": float(target_theta),
+                    "sampled_theta_deg": candidate.sampled_theta_deg,
+                    "min_gain_dbi": candidate.min_gain_dbi,
+                    "p10_gain_dbi": candidate.p10_gain_dbi,
+                    "mean_gain_dbi": candidate.mean_gain_dbi,
+                    "p90_gain_dbi": candidate.p90_gain_dbi,
+                    "peak_gain_dbi": candidate.peak_gain_dbi,
+                    "ripple_p90_p10_db": candidate.ripple_p90_p10_db,
+                    "peak_to_null_db": candidate.peak_to_null_db,
+                }
+                for target_theta, candidate in zip(
+                    theta_degrees,
+                    rings,
+                    strict=True,
+                )
+            ]
             summary.update(
+                target_theta_deg=float(theta_degrees[worst_index]),
+                rings=ring_summaries,
+                ring_target_count=len(rings),
+                ring_worst_target_theta_deg=float(theta_degrees[worst_index]),
                 ring_sampled_theta_deg=ring.sampled_theta_deg,
                 ring_min_gain_dbi=ring.min_gain_dbi,
                 ring_p10_gain_dbi=ring.p10_gain_dbi,
@@ -185,12 +238,37 @@ def result_summary(
                 ring_peak_gain_dbi=ring.peak_gain_dbi,
                 ring_ripple_p90_p10_db=ring.ripple_p90_p10_db,
                 ring_peak_to_null_db=ring.peak_to_null_db,
+                ring_minimum_across_targets_dbi=min(
+                    candidate.min_gain_dbi for candidate in rings
+                ),
+                ring_maximum_ripple_across_targets_db=max(
+                    candidate.ripple_p90_p10_db for candidate in rings
+                ),
             )
             if pattern_target["beamwidth_deg"] is not None:
+                widths = [
+                    result.azimuth_ring_beamwidth_deg(float(target_theta))
+                    for target_theta in theta_degrees
+                ]
+                for ring_summary, width in zip(
+                    ring_summaries,
+                    widths,
+                    strict=True,
+                ):
+                    ring_summary["beamwidth_deg"] = width
                 summary.update(
                     target_beamwidth_deg=pattern_target["beamwidth_deg"],
-                    ring_beamwidth_deg=result.azimuth_ring_beamwidth_deg(
-                        theta_deg
+                    ring_beamwidth_deg=widths[worst_index],
+                    ring_beamwidths_deg=widths,
+                    ring_beamwidth_rms_error_deg=float(
+                        np.sqrt(
+                            np.mean(
+                                (
+                                    np.asarray(widths)
+                                    - pattern_target["beamwidth_deg"]
+                                )**2
+                            )
+                        )
                     ),
                 )
         else:
@@ -245,19 +323,44 @@ def print_summary(name: str, summary: dict, frequency_hz: float) -> None:
             f"phi {summary['target_phi_deg']:.2f} deg"
         )
     if "ring_p10_gain_dbi" in summary:
-        print(
-            f"Ring target     : theta {summary['target_theta_deg']:.2f} deg, "
-            f"all phi; P10 {summary['ring_p10_gain_dbi']:.3f} dBi, "
-            f"minimum {summary['ring_min_gain_dbi']:.3f} dBi, "
-            f"ripple {summary['ring_ripple_p90_p10_db']:.3f} dB"
-        )
+        rings = summary.get("rings", [])
+        if len(rings) > 1:
+            for ring in rings:
+                print(
+                    f"Ring {ring['target_theta_deg']:g} deg    : all phi; "
+                    f"P10 {ring['p10_gain_dbi']:.3f} dBi, "
+                    f"minimum {ring['min_gain_dbi']:.3f} dBi, "
+                    f"ripple {ring['ripple_p90_p10_db']:.3f} dB"
+                )
+            print(
+                f"Worst ring P10  : {summary['ring_p10_gain_dbi']:.3f} dBi "
+                f"at theta {summary['ring_worst_target_theta_deg']:g} deg"
+            )
+        else:
+            print(
+                f"Ring target     : theta {summary['target_theta_deg']:.2f} deg, "
+                f"all phi; P10 {summary['ring_p10_gain_dbi']:.3f} dBi, "
+                f"minimum {summary['ring_min_gain_dbi']:.3f} dBi, "
+                f"ripple {summary['ring_ripple_p90_p10_db']:.3f} dB"
+            )
     if "target_beamwidth_deg" in summary:
         if "ring_beamwidth_deg" in summary:
-            print(
-                f"Ring HPBW       : target "
-                f"{summary['target_beamwidth_deg']:.2f} deg; measured "
-                f"{summary['ring_beamwidth_deg']:.2f} deg"
-            )
+            if len(summary.get("ring_beamwidths_deg", [])) > 1:
+                widths = "/".join(
+                    f"{float(width):.2f}"
+                    for width in summary["ring_beamwidths_deg"]
+                )
+                print(
+                    f"Ring HPBWs      : target "
+                    f"{summary['target_beamwidth_deg']:.2f} deg each; measured "
+                    f"{widths} deg"
+                )
+            else:
+                print(
+                    f"Ring HPBW       : target "
+                    f"{summary['target_beamwidth_deg']:.2f} deg; measured "
+                    f"{summary['ring_beamwidth_deg']:.2f} deg"
+                )
         else:
             print(
                 f"Target HPBW     : {summary['target_beamwidth_deg']:.2f} deg; "
@@ -314,17 +417,25 @@ def save_plots(
     plt.close(polar)
 
     if pattern_target is not None and pattern_target["mode"] == "ring":
-        target_theta = np.deg2rad(pattern_target["theta_deg"])
-        target_index = int(np.argmin(np.abs(theta[0, :] - target_theta)))
-        target_phi = phi[:-1, target_index]
-        target_gain = values[:-1, target_index]
         polar = plt.figure(figsize=(7, 7))
         axis = polar.add_subplot(111, projection="polar")
-        axis.plot(target_phi, target_gain)
-        axis.set_title(
-            "Verified target-ring realized gain at theta "
-            f"{np.rad2deg(theta[0, target_index]):g} degrees (dBi)"
-        )
+        sampled_thetas = []
+        for target_theta_deg in pattern_target.get(
+            "theta_degrees",
+            (pattern_target["theta_deg"],),
+        ):
+            target_theta = np.deg2rad(target_theta_deg)
+            target_index = int(np.argmin(np.abs(theta[0, :] - target_theta)))
+            sampled_theta = float(np.rad2deg(theta[0, target_index]))
+            sampled_thetas.append(sampled_theta)
+            axis.plot(
+                phi[:-1, target_index],
+                values[:-1, target_index],
+                label=f"theta {target_theta_deg:g} deg",
+            )
+        axis.set_title("Verified target-ring realized gain (dBi)")
+        if len(sampled_thetas) > 1:
+            axis.legend(loc="upper right", bbox_to_anchor=(1.25, 1.12))
         axis.grid(True, alpha=0.35)
         polar.tight_layout()
         polar.savefig(output/"target_ring_gain.png", dpi=180)
