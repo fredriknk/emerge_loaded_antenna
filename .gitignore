@@ -221,3 +221,8 @@ __marimo__/
 
 # Local optimizer run artifacts
 optimization_results/
+
+# Generated example fabrication artifacts
+example_outputs/
+/coil_formers.step
+/my_manual_antenna.pdf

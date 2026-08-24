@@ -8,7 +8,10 @@ import numpy as np
 
 from emerge_loaded_antenna import AntennaDesign, CoilDesign
 from emerge_loaded_antenna.drawing import (
+    A3_LANDSCAPE_SIZE_INCHES,
+    _draw_gain_lobes,
     _horizon_gain,
+    _xz_gain,
     derive_drawing_dimensions,
     export_drawing,
     radial_centerlines,
@@ -56,6 +59,10 @@ def test_example_dimensions():
     assert math.isclose(dims.wire_diameter, 0.0016)
     assert math.isclose(dims.coils[0].diameter, 0.029938169262053172)
     assert math.isclose(dims.coils[1].diameter, 0.019488480965145736)
+    assert math.isclose(dims.coils[0].inside_diameter, 0.028338169262053172)
+    assert math.isclose(dims.coils[1].inside_diameter, 0.017888480965145736)
+    assert math.isclose(dims.coils[0].transition_radius, 0.007863117754520154)
+    assert math.isclose(dims.coils[1].transition_radius, 0.007395249073612345)
     assert math.isclose(dims.coils[0].alpha_deg, 18.227, abs_tol=0.002)
     assert math.isclose(dims.coils[1].alpha_deg, 28.164, abs_tol=0.002)
     assert math.isclose(dims.coils[0].middle_rotation_deg, 323.547, abs_tol=0.003)
@@ -94,6 +101,12 @@ def test_svg_export(tmp_path):
     assert destination.exists()
     assert destination.stat().st_size > 10_000
 
+    header = destination.read_text(encoding="utf-8")[:1000]
+    width_points = A3_LANDSCAPE_SIZE_INCHES[0] * 72.0
+    height_points = A3_LANDSCAPE_SIZE_INCHES[1] * 72.0
+    assert f'width="{width_points:.6f}pt"' in header
+    assert f'height="{height_points:.6f}pt"' in header
+
 
 def solved_result():
     theta_axis = np.array((0.0, np.pi / 2.0, np.pi))
@@ -117,6 +130,29 @@ def test_horizon_gain_extracts_and_closes_polar_cut():
     assert math.isclose(phi[-1], 2.0 * np.pi, abs_tol=1e-12)
     assert math.isclose(gain_db[0], 3.0, abs_tol=1e-12)
     assert math.isclose(gain_db[-1], gain_db[0], abs_tol=1e-12)
+
+
+def test_xz_gain_extracts_both_meridians_and_closes_cut():
+    angle, gain_db = _xz_gain(solved_result())
+
+    np.testing.assert_allclose(
+        angle,
+        (0.0, np.pi / 2.0, np.pi, 3.0 * np.pi / 2.0, 2.0 * np.pi),
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(gain_db, (3.0, 3.0, 3.0, -1.0, -1.0))
+
+
+def test_gain_lobes_use_clockwise_compass_orientation():
+    from matplotlib.figure import Figure
+
+    figure = Figure()
+    axis = figure.add_subplot(111, projection="polar")
+    _draw_gain_lobes(axis, solved_result())
+
+    assert math.isclose(axis.get_theta_offset(), np.pi / 2.0)
+    assert axis.get_theta_direction() == -1.0
+    figure.clear()
 
 
 def test_svg_export_includes_solved_rf_plots(tmp_path):

@@ -21,10 +21,10 @@ from emerge_loaded_antenna import (
     FrequencySweep,
     MeshSettings,
     SimulationOptions,
-    export_jig_models,
     simulate,
 )
 from emerge_loaded_antenna.drawing import export_drawing
+from emerge_loaded_antenna.formers import export_coil_formers
 
 MHz = 1e6
 mm = 1e-3
@@ -66,7 +66,7 @@ SHOW_MESH = False
 SHOW_3D_FARFIELD = False
 FARFIELD_DB_FLOOR = -30.0
 EXPORT_DESIGN_SHEET = True
-EXPORT_JIG_MODELS = True
+EXPORT_FORMERS = True
 EXAMPLE_OUTPUT = Path("example_outputs")
 
 OPTIONS = SimulationOptions(
@@ -253,10 +253,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def export_example_artifacts(result) -> tuple[Path | None, tuple[Path, ...]]:
-    """Export the example design sheet and printable coil winding jigs."""
+def export_example_artifacts(result) -> tuple[Path | None, Path | None]:
+    """Export the example design sheet and coil-forming CAD tools."""
     sheet = None
-    jigs: tuple[Path, ...] = ()
+    formers = None
     if EXPORT_DESIGN_SHEET:
         sheet = export_drawing(
             DESIGN,
@@ -265,15 +265,16 @@ def export_example_artifacts(result) -> tuple[Path | None, tuple[Path, ...]]:
             title=f"{F0/MHz:g} MHz Static Example",
         )
         print(f"Design sheet     : {sheet.resolve()}")
-    if EXPORT_JIG_MODELS:
-        jigs = export_jig_models(DESIGN, EXAMPLE_OUTPUT / "jig_models")
-        print(
-            "Jig manifest     : "
-            f"{(EXAMPLE_OUTPUT / 'jig_models' / 'jig_models.json').resolve()}"
+    if EXPORT_FORMERS:
+        formers = export_coil_formers(
+            DESIGN,
+            EXAMPLE_OUTPUT / "coil_formers.step",
+            extra_length=5*mm,
+            groove_clearance=0.1*mm,
+            spacing=5*mm,
         )
-        for path in jigs:
-            print(f"Jig model        : {path.resolve()}")
-    return sheet, jigs
+        print(f"Forming tools    : {formers.resolve()}")
+    return sheet, formers
 
 
 def main() -> None:

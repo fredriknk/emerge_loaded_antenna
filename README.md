@@ -29,6 +29,7 @@ Command-line options use MHz, millimetres, and degrees where stated.
   - [Create and edit designs](#create-and-edit-designs)
   - [Save, load, and scale designs](#save-load-and-scale-designs)
   - [Fabrication drawings](#fabrication-drawings)
+  - [Printable forming tools](#printable-forming-tools)
 - [Simulation](#simulation)
   - [Run a simulation](#run-a-simulation)
   - [Simulation configuration](#simulation-configuration)
@@ -67,8 +68,8 @@ Command-line options use MHz, millimetres, and degrees where stated.
 - Multi-topology, multi-seed optimization campaigns with global and fine modes.
 - Dimensioned PDF, SVG, or PNG fabrication sheets with optional S11 and
   horizon-pattern plots.
-- Printable grooved STL winding mandrels derived from each coil's wire size,
-  radius, pitch, and handedness.
+- STEP/STL winding formers, sizing mandrels, transition markers, and a radial
+  angle-and-length gauge generated from the antenna geometry.
 - Broadband matching penalties, height limits, horizon or directional pattern
   goals, optional beamwidth targeting, and repeat confirmation of incumbents.
 - Atomic progress artifacts, CSV evaluation logs, topology rankings, and JSON
@@ -306,7 +307,7 @@ handedness, and impedance.
 
 ### Fabrication drawings
 
-Generate a dimensioned A4 landscape sheet from a raw design or optimizer result:
+Generate a dimensioned A3 landscape sheet from a raw design or optimizer result:
 
 ```powershell
 .\.venv\Scripts\python.exe -m emerge_loaded_antenna.drawing `
@@ -317,11 +318,12 @@ Generate a dimensioned A4 landscape sheet from a raw design or optimizer result:
 
 PDF, SVG, and PNG output are supported. The sheet contains X-Z, Y-Z, and X-Y
 orthographic views, radiator and coil dimensions, radial geometry, and a
-fabrication table. The command-line exporter has no live solver result, so its
-RF panels are labeled as unavailable.
+fabrication table. Coil callouts include centerline radius, clear inside or
+mandrel diameter, pitch, and transition bend radius. The command-line exporter
+has no live solver result, so its RF panels are labeled as unavailable.
 
 Pass a solved `SimulationResult` through the Python API to include the complete
-S11 sweep and XY/horizon realized-gain lobe:
+S11 sweep and overlaid XY/horizon and XZ/elevation realized-gain lobes:
 
 ```python
 from emerge_loaded_antenna.drawing import export_drawing
@@ -336,6 +338,42 @@ export_drawing(
 
 Drawing export requires Matplotlib. Install only that optional feature with
 `pip install -e ".[drawing]"`; it is also installed by the `verify` extra.
+
+### Printable forming tools
+
+The easyradius forming tool creates exact CAD solids independently of the EM
+model:
+
+```python
+from emerge_loaded_antenna.formers import export_coil_formers
+
+export_coil_formers(design, "coil_formers.step")
+export_coil_formers(design, "coil_formers.stl")
+```
+
+For every loading coil, the output contains a winding former whose blank
+diameter equals the coil centerline diameter. The complete Hermite-transition
+and helix path is swept and subtracted to form a half-round wire groove through
+both end faces. The default groove clearance is 0.1 mm.
+
+Each coil also receives an inside-diameter sizing mandrel with a shallow guide
+for correcting spring-back. Four witness notches identify the start and end of
+both transitions. A flat radial gauge carries the modeled radial angle, nominal
+length mark, and ground-hub relief. All parts are separate solids in the STEP
+file and are spaced for fabrication.
+
+The standalone command accepts either a design JSON or an optimizer result:
+
+```powershell
+.\.venv\Scripts\python.exe -m emerge_loaded_antenna.formers `
+    optimization_results\868mhz_horizon\campaign_best.json `
+    coil_formers.step
+```
+
+Use `--no-sizing-mandrels` or `--no-radial-gauge` to omit those tools. The CLI
+also exposes groove clearance, spacing, marker dimensions, gauge dimensions,
+and STL mesh size; run it with `--help` for the full list. Former construction
+uses an independent Gmsh model and never enters `build_model()` or `simulate()`.
 
 ## Simulation
 
@@ -436,11 +474,12 @@ The complete physical antenna is declared directly in `main.py` with static
 the packaged optimizer reference. The simulation, viewer, and export switches
 are also defined beside it so the file remains a compact experiment.
 
-With `EXPORT_DESIGN_SHEET` and `EXPORT_JIG_MODELS` enabled, the example writes
-`example_outputs/design_sheet.pdf`, `example_outputs/jig_models/jig_models.json`,
-and one winding-jig STL per coil. A solved run adds S11 and horizon gain to the
-sheet; a mesh-only run still creates the dimensions, placeholders, and jig
-models. Closing an EMerge/Gmsh viewer continues execution.
+With `EXPORT_DESIGN_SHEET` and `EXPORT_FORMERS` enabled, the example writes
+`example_outputs/design_sheet.pdf` and `example_outputs/coil_formers.step`.
+The STEP file contains winding formers, sizing mandrels, and the radial gauge.
+A solved run adds S11 and gain lobes to the sheet; a mesh-only run still creates
+the dimensions, placeholders, and forming tools. Closing an EMerge/Gmsh viewer
+continues execution.
 
 ## Campaign optimizer
 
@@ -893,14 +932,11 @@ Verification output includes:
 
 With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
 verification result, so the sheet includes dimensions, the verified S11 sweep,
-and the XY/horizon gain lobe.
+and the XY/horizon and XZ/elevation gain lobes.
 
-With `--jig-models`, it writes one binary STL winding mandrel per loading coil
-under `jig_models/`, plus `jig_models.json`. Each mandrel has a helical guide
-groove matching the coil pitch and handedness. Its groove-root radius accounts
-for wire radius and 0.15 mm print clearance; the manifest records the exact
-derived dimensions in millimetres. An unloaded design produces only the empty
-manifest because it has no coils to wind.
+With `--jig-models`, it writes `coil_formers.step`, containing the exact grooved
+winding formers, sizing mandrels, transition witness marks, and radial gauge.
+For a zero-coil design the flag reports that no forming tools are needed.
 
 Use `--show-model`, `--show-mesh`, or `--show-3d` for interactive inspection,
 and `--skip-coarse` when only the fine run is needed. A warning is emitted for
@@ -1024,7 +1060,7 @@ emerge_loaded_antenna/
   config.py          physical and numerical configuration
   geometry.py        continuous radiator centerline construction
   drawing.py         fabrication dimensions and PDF/SVG/PNG export
-  jigs.py            printable grooved coil-winding jig STL export
+  formers.py         STEP/STL winding, sizing, and radial forming tools
   simulation.py      EMerge model, solve, and far-field metrics
   optimize.py        reusable design spaces and objectives
   presets.py         tracked reference design and scaling

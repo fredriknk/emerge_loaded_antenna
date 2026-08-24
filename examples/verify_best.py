@@ -22,12 +22,12 @@ from emerge_loaded_antenna import (
     MeshSettings,
     SimulationOptions,
     SimulationResult,
-    export_jig_models,
     load_design,
     load_reference_design,
     simulate,
 )
 from emerge_loaded_antenna.drawing import export_drawing
+from emerge_loaded_antenna.formers import export_coil_formers
 
 
 def gain_db(farfield) -> np.ndarray:
@@ -217,20 +217,13 @@ def export_fabrication_artifacts(
         artifacts["design_sheet"] = sheet.name
         print(f"Design sheet       : {sheet.resolve()}")
     if jig_models:
-        jig_directory = output / "jig_models"
-        models = export_jig_models(design, jig_directory)
-        artifacts["jig_manifest"] = (
-            jig_directory / "jig_models.json"
-        ).relative_to(output).as_posix()
-        artifacts["jig_models"] = [
-            path.relative_to(output).as_posix() for path in models
-        ]
-        print(f"Jig model manifest : {(jig_directory / 'jig_models.json').resolve()}")
-        if models:
-            for path in models:
-                print(f"Jig model          : {path.resolve()}")
+        if design.coil_count:
+            models = export_coil_formers(design, output / "coil_formers.step")
+            artifacts["jig_models"] = [models.name]
+            print(f"Forming tools      : {models.resolve()}")
         else:
-            print("Jig models         : no loading coils; manifest only")
+            artifacts["jig_models"] = []
+            print("Forming tools      : no loading coils")
     return artifacts
 
 
@@ -312,7 +305,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jig-models",
         action="store_true",
-        help="export printable grooved coil-winding jig STL files",
+        help="export coil formers, sizing mandrels, and a radial gauge as STEP",
     )
     args = parser.parse_args()
     if args.frequency_mhz is not None and (
