@@ -216,7 +216,7 @@ outside diameter is:
 
 `radial_angle_deg` is the downward angle of the **ground-plane radials**. It is
 not the far-field lobe direction. Lobe direction is selected in the optimizer
-with `--target-theta` and `--target-phi`.
+with `--target-theta`; add `--target-phi` only for a single azimuth direction.
 
 ### Design objects
 
@@ -450,6 +450,17 @@ The far-field convention is spherical:
 solver data, and `FarFieldMetrics`. The latter includes peak direction and
 horizon minimum, P10, mean, P90, peak, P90-P10 ripple, and peak-to-null range.
 
+For an omnidirectional ring away from the horizon:
+
+```python
+ring = result.azimuth_ring_metrics(theta_deg=100)
+print(ring.p10_gain_dbi, ring.min_gain_dbi, ring.ripple_p90_p10_db)
+ring_hpbw = result.azimuth_ring_beamwidth_deg(theta_deg=100)
+```
+
+The ring beamwidth uses the P10-over-phi gain profile versus theta, so it
+represents the robust elevation width of the full azimuth ring.
+
 For a requested directional lobe, use:
 
 ```python
@@ -623,17 +634,31 @@ them.
 
 ### Pattern, lobe, and beamwidth goals
 
-Choose one of three pattern modes:
+Choose one of four pattern modes:
 
 | Mode | Useful-gain term | Additional pattern behavior |
 |---|---|---|
 | `horizon` | Horizon P10 gain | Penalizes insufficient horizon minimum and excess P90-P10 ripple. |
+| `ring` | P10 gain around all phi at requested theta | Applies the horizon minimum/ripple objective to a conical azimuth ring. |
 | `directional` | Gain at requested theta/phi | Optionally targets HPBW on two orthogonal cuts. |
 | `peak` | Global peak gain | No directional or horizon-shape penalty. |
 
-Supplying `--target-theta`, `--target-phi`, or `--target-beamwidth-deg`
-automatically selects directional mode. An explicit conflicting choice such as
-`--pattern horizon --target-theta 100` is rejected immediately.
+With no pattern flags, the optimizer uses the existing horizon ring at theta
+90 degrees. Supplying only `--target-theta` selects `ring` mode at that theta
+and optimizes every phi equally. Supplying `--target-phi` selects a single
+`directional` coordinate. Explicit conflicting combinations are rejected.
+
+Omnidirectional conical-ring example:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --target-theta 100 `
+    --hours 8
+```
+
+This maximizes azimuthal P10 gain at theta 100 degrees and penalizes weak
+azimuths and excess P90-P10 ripple around that entire ring. Phi is deliberately
+unspecified.
 
 Directional example:
 
@@ -645,8 +670,9 @@ Directional example:
     --hours 8
 ```
 
-`--target-theta` is the lobe's polar angle and `--target-phi` its azimuth. They
-default to 90 and 0 degrees. These options are unrelated to the physical
+`--target-theta` is the ring or lobe's polar angle. `--target-phi` is used only
+for a single directional target. Defaults are theta 90 degrees and, when
+needed, phi 0 degrees. These options are unrelated to the physical
 ground-radial angle.
 
 Add a half-power beamwidth goal with:
@@ -661,8 +687,11 @@ Add a half-power beamwidth goal with:
     --hours 8
 ```
 
-The same target is applied to the two orthogonal great-circle cuts through the
-requested lobe. Their beamwidth errors are combined as RMS. The penalty is:
+For directional mode, the same target is applied to the two orthogonal
+great-circle cuts through the requested lobe and their errors are combined as
+RMS. For ring mode, beamwidth is measured in theta/elevation from the
+azimuthal-P10 profile, so the entire ring must retain the requested width. The
+penalty is:
 
 ```text
 beamwidth_weight * mean((beamwidth_error_degrees / 10)^2)
@@ -702,9 +731,9 @@ Main controls:
 | `--s11-margin-weight` | `0.10` | Match-margin reward weight. |
 | `--maximum-height-mm` | topology-dependent | Physical radiator-height limit. |
 | `--height-weight` | `0.10` | Weight of squared height excess. |
-| `--minimum-horizon-gain-dbi` | `2` | Horizon minimum target in horizon mode. |
-| `--null-weight` | `0.25` | Weight of horizon minimum deficit. |
-| `--maximum-ripple-db` | `1.5` | Allowed horizon P90-P10 ripple. |
+| `--minimum-horizon-gain-dbi` | `2` | Minimum azimuth-ring gain in horizon/ring mode (legacy option name). |
+| `--null-weight` | `0.25` | Weight of azimuth-ring minimum deficit. |
+| `--maximum-ripple-db` | `1.5` | Allowed azimuth-ring P90-P10 ripple. |
 | `--ripple-weight` | `0.15` | Weight of excess ripple. |
 
 If height is not set, the campaign uses
@@ -816,10 +845,10 @@ Pattern and objective:
 
 | Option | Default | Meaning |
 |---|---:|---|
-| `--pattern` | `horizon` | `horizon`, `directional`, or `peak`. |
-| `--target-theta` | `90` degrees | Requested directional-lobe polar angle. |
-| `--target-phi` | `0` degrees | Requested directional-lobe azimuth. |
-| `--target-beamwidth-deg` | disabled | HPBW target on both orthogonal cuts; directional mode only. |
+| `--pattern` | `horizon` | `horizon`, `ring`, `directional`, or `peak`. |
+| `--target-theta` | `90` degrees | Omnidirectional ring angle, or directional polar angle when phi is supplied. |
+| `--target-phi` | unspecified | Optional azimuth; supplying it selects a single directional target. |
+| `--target-beamwidth-deg` | disabled | Ring elevation HPBW, or both directional cuts when phi is supplied. |
 | `--beamwidth-weight` | `1` | Beamwidth-error penalty weight. |
 | `--maximum-height-mm` | automatic | Maximum radiator height. |
 | `--s11-limit-db` | `-10` | Match constraint at every sampled frequency. |
@@ -828,9 +857,9 @@ Pattern and objective:
 | `--s11-margin-weight` | `0.10` | Match-margin reward weight. |
 | `--confirmation-runs` | `3` | Odd number of incumbent repeat solves. |
 | `--confirmation-score-tolerance` | `1` | Allowed confirmation-score spread. |
-| `--minimum-horizon-gain-dbi` | `2` | Minimum-gain target in horizon mode. |
-| `--null-weight` | `0.25` | Horizon minimum-deficit weight. |
-| `--maximum-ripple-db` | `1.5` | Horizon P90-P10 ripple target. |
+| `--minimum-horizon-gain-dbi` | `2` | Minimum azimuth-ring gain in horizon/ring mode (legacy option name). |
+| `--null-weight` | `0.25` | Azimuth-ring minimum-deficit weight. |
+| `--maximum-ripple-db` | `1.5` | Azimuth-ring P90-P10 ripple target. |
 | `--ripple-weight` | `0.15` | Excess-ripple weight. |
 | `--height-weight` | `0.10` | Height-excess weight. |
 
@@ -1006,11 +1035,12 @@ important for narrow directional lobes and beamwidth objectives.
 
 - **Feasible beats merely high-gain.** Check every S11 point, height, pattern
   constraints, and the topology leaderboard's feasibility fields.
-- **P10 is robust horizon gain.** In horizon mode, 90% of azimuth samples are
-  at or above P10; it is less sensitive to one isolated numerical spike than
-  peak gain.
-- **Beamwidth is a tradeoff.** It is a weighted soft penalty. Inspect both cut
-  widths and requested-direction gain in the JSON instead of only total score.
+- **P10 is robust ring gain.** In horizon and ring modes, 90% of azimuth
+  samples are at or above P10; it is less sensitive to one isolated numerical
+  spike than peak gain.
+- **Beamwidth is a tradeoff.** It is a weighted soft penalty. Inspect the ring
+  elevation width or both directional cut widths in the JSON instead of only
+  total score.
 - **A best candidate is not yet a validated antenna.** Confirmation reduces
   solver noise; it does not replace mesh/open-region convergence or measurement.
 - **Scores compare only like-for-like campaigns.** Changing weights, match
@@ -1032,10 +1062,11 @@ transition, straight, and radial bounds include diameter-dependent clearance.
 Reduce the requested diameter or choose a frequency/topology with enough
 physical room.
 
-**A directional target conflicts with `--pattern`.** Directional target flags
-select directional mode automatically. Remove an explicit `--pattern horizon`
-or `--pattern peak`, or change it to `--pattern directional`. A beamwidth target
-must be greater than zero and no more than 360 degrees.
+**A pattern target conflicts with `--pattern`.** Theta alone selects ring mode;
+phi selects directional mode. Do not combine `--pattern ring` with
+`--target-phi`, or `--pattern horizon`/`peak` with a ring or direction target.
+A beamwidth target must be greater than zero and no more than 180 degrees for a
+ring or 360 degrees for a directional point.
 
 **The lobe points in the wrong direction.** Confirm the spherical convention:
 theta is measured from +Z and phi from +X toward +Y. Do not confuse target

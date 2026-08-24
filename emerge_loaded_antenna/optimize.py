@@ -368,16 +368,20 @@ class RobustGainObjective:
     """Optimize useful gain with broadband match and pattern constraints.
 
     ``pattern_mode="horizon"`` maximizes the 10th-percentile azimuth gain at
-    zero elevation. ``"directional"`` maximizes one requested theta/phi
-    direction and can target the HPBW of both orthogonal cuts through it,
-    while ``"peak"`` retains the original unconstrained behavior.
+    zero elevation. ``"ring"`` applies the same robust azimuth objective at a
+    requested theta and can target its elevation HPBW. ``"directional"``
+    maximizes one requested theta/phi direction and can target the HPBW of both
+    orthogonal cuts through it, while ``"peak"`` retains the original
+    unconstrained behavior.
     """
 
     def __init__(
         self,
         space: DesignSpace,
         target_frequency: float = 868e6,
-        pattern_mode: Literal["horizon", "directional", "peak"] = "horizon",
+        pattern_mode: Literal[
+            "horizon", "ring", "directional", "peak"
+        ] = "horizon",
         target_theta_deg: float = 90.0,
         target_phi_deg: float = 0.0,
         target_beamwidth_deg: float | None = None,
@@ -400,23 +404,25 @@ class RobustGainObjective:
         confirmation_score_tolerance: float = 1.0,
         on_confirmation: ConfirmationCallback | None = None,
     ):
-        if pattern_mode not in {"horizon", "directional", "peak"}:
+        if pattern_mode not in {"horizon", "ring", "directional", "peak"}:
             raise ValueError("invalid pattern_mode")
         if not 0 <= target_theta_deg <= 180:
             raise ValueError("target_theta_deg must be between zero and 180")
         if not np.isfinite(target_phi_deg):
             raise ValueError("target_phi_deg must be finite")
         if target_beamwidth_deg is not None:
-            if pattern_mode != "directional":
+            if pattern_mode not in {"ring", "directional"}:
                 raise ValueError(
-                    "target_beamwidth_deg requires directional pattern mode"
+                    "target_beamwidth_deg requires ring or directional pattern mode"
                 )
+            beamwidth_limit = 180.0 if pattern_mode == "ring" else 360.0
             if (
                 not np.isfinite(target_beamwidth_deg)
-                or not 0 < target_beamwidth_deg <= 360
+                or not 0 < target_beamwidth_deg <= beamwidth_limit
             ):
                 raise ValueError(
-                    "target_beamwidth_deg must be finite and between 0 and 360"
+                    "target_beamwidth_deg must be finite and between 0 and "
+                    f"{beamwidth_limit:g} for {pattern_mode} mode"
                 )
         if maximum_height <= 0:
             raise ValueError("maximum_height must be positive")
@@ -576,6 +582,30 @@ class RobustGainObjective:
                     self.ripple_weight*ripple_excess**2
                     + self.null_weight*null_deficit**2
                 )
+            elif self.pattern_mode == "ring":
+                ring = result.azimuth_ring_metrics(self.target_theta_deg)
+                useful_gain = ring.p10_gain_dbi
+                ripple_excess = max(
+                    0.0,
+                    ring.ripple_p90_p10_db
+                    - self.maximum_horizon_ripple_db,
+                )
+                null_deficit = max(
+                    0.0,
+                    self.minimum_horizon_gain_dbi - ring.min_gain_dbi,
+                )
+                pattern_penalty = (
+                    self.ripple_weight*ripple_excess**2
+                    + self.null_weight*null_deficit**2
+                )
+                if self.target_beamwidth_deg is not None:
+                    ring_beamwidth = result.azimuth_ring_beamwidth_deg(
+                        self.target_theta_deg
+                    )
+                    beamwidth_error = ring_beamwidth - self.target_beamwidth_deg
+                    beamwidth_penalty = self.beamwidth_weight*float(
+                        (beamwidth_error/10.0)**2
+                    )
             elif self.pattern_mode == "directional":
                 useful_gain = result.gain_db_at(
                     self.target_theta_deg,
@@ -642,19 +672,38 @@ class RobustGainObjective:
                 "beamwidth_penalty": beamwidth_penalty,
                 "height_penalty": height_penalty,
             }
-            if self.pattern_mode == "directional":
+            if self.pattern_mode == "ring":
+                metrics.update(
+                    target_theta_deg=self.target_theta_deg,
+                    ring_sampled_theta_deg=ring.sampled_theta_deg,
+                    ring_min_gain_dbi=ring.min_gain_dbi,
+                    ring_p10_gain_dbi=ring.p10_gain_dbi,
+                    ring_mean_gain_dbi=ring.mean_gain_dbi,
+                    ring_p90_gain_dbi=ring.p90_gain_dbi,
+                    ring_peak_gain_dbi=ring.peak_gain_dbi,
+                    ring_ripple_db=ring.ripple_p90_p10_db,
+                    ring_peak_to_null_db=ring.peak_to_null_db,
+                )
+            elif self.pattern_mode == "directional":
                 metrics.update(
                     target_theta_deg=self.target_theta_deg,
                     target_phi_deg=self.target_phi_deg,
                     target_gain_dbi=float(useful_gain),
                 )
             if self.target_beamwidth_deg is not None:
-                metrics.update(
-                    target_beamwidth_deg=self.target_beamwidth_deg,
-                    elevation_beamwidth_deg=elevation_width,
-                    azimuth_beamwidth_deg=azimuth_width,
-                    beamwidth_error_deg=beamwidth_error,
-                )
+                if self.pattern_mode == "ring":
+                    metrics.update(
+                        target_beamwidth_deg=self.target_beamwidth_deg,
+                        ring_beamwidth_deg=ring_beamwidth,
+                        beamwidth_error_deg=beamwidth_error,
+                    )
+                else:
+                    metrics.update(
+                        target_beamwidth_deg=self.target_beamwidth_deg,
+                        elevation_beamwidth_deg=elevation_width,
+                        azimuth_beamwidth_deg=azimuth_width,
+                        beamwidth_error_deg=beamwidth_error,
+                    )
             if self.s11_margin_target_db is not None:
                 metrics["s11_margin_target_db"] = self.s11_margin_target_db
             metrics.update(

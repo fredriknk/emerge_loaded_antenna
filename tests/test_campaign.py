@@ -51,16 +51,27 @@ from examples.optimize_gain import (
 
 
 class CampaignTests(unittest.TestCase):
-    def test_target_theta_alone_selects_directional_mode(self):
+    def test_target_theta_alone_selects_omnidirectional_ring_mode(self):
         with patch(
             "sys.argv",
             ["optimize_gain.py", "--target-theta", "100"],
         ):
             args = parse_args()
 
-        self.assertEqual(args.pattern, "directional")
+        self.assertEqual(args.pattern, "ring")
         self.assertEqual(args.target_theta, 100.0)
         self.assertEqual(args.target_phi, 0.0)
+
+    def test_target_phi_selects_single_direction_mode(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--target-theta", "100", "--target-phi", "20"],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.pattern, "directional")
+        self.assertEqual(args.target_theta, 100.0)
+        self.assertEqual(args.target_phi, 20.0)
 
     def test_cli_accepts_wire_diameter_and_directional_lobe_target(self):
         with patch(
@@ -117,6 +128,7 @@ class CampaignTests(unittest.TestCase):
                 "0",
             ],
             ["--pattern", "peak", "--target-beamwidth-deg", "60"],
+            ["--target-theta", "100", "--target-beamwidth-deg", "181"],
             ["--beamwidth-weight", "-1"],
         )
 
@@ -145,6 +157,15 @@ class CampaignTests(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 parse_args()
+
+        with (
+            patch(
+                "sys.argv",
+                ["optimize_gain.py", "--pattern", "ring", "--target-phi", "20"],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
 
     def test_design_override_converts_diameter_and_leaves_input_unchanged(self):
         original = AntennaDesign(wire_radius=0.7e-3, radial_angle_deg=60.0)

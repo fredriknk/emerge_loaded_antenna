@@ -35,19 +35,27 @@ def gain_db(farfield) -> np.ndarray:
     return 20*np.log10(np.maximum(amplitude, 1e-12))
 
 
-def directional_target_from_payload(payload: object) -> dict | None:
-    """Recover a directional objective from an optimizer result payload."""
+def pattern_target_from_payload(payload: object) -> dict | None:
+    """Recover a ring or directional objective from optimizer metadata."""
     if not isinstance(payload, dict):
         return None
     simulation = payload.get("simulation")
     if not isinstance(simulation, dict):
         return None
     objective = simulation.get("objective")
-    if not isinstance(objective, dict) or objective.get("pattern_mode") != "directional":
+    if not isinstance(objective, dict):
+        return None
+    mode = objective.get("pattern_mode")
+    if mode not in {"ring", "directional"}:
         return None
     return {
+        "mode": mode,
         "theta_deg": float(objective.get("target_theta_deg", 90.0)),
-        "phi_deg": float(objective.get("target_phi_deg", 0.0)),
+        "phi_deg": (
+            float(objective.get("target_phi_deg", 0.0))
+            if mode == "directional"
+            else None
+        ),
         "beamwidth_deg": (
             float(objective["target_beamwidth_deg"])
             if objective.get("target_beamwidth_deg") is not None
@@ -59,7 +67,7 @@ def directional_target_from_payload(payload: object) -> dict | None:
 def result_summary(
     result: SimulationResult,
     frequency_hz: float,
-    directional_target: dict | None = None,
+    pattern_target: dict | None = None,
 ) -> dict:
     pattern = result.farfield_metrics
     if pattern is None:
@@ -93,21 +101,44 @@ def result_summary(
         "frequencies_hz": result.frequencies.tolist(),
         "s11_db": result.s11_db.tolist(),
     }
-    if directional_target is not None:
-        theta_deg = directional_target["theta_deg"]
-        phi_deg = directional_target["phi_deg"]
-        summary.update(
-            target_theta_deg=theta_deg,
-            target_phi_deg=phi_deg,
-            target_gain_dbi=result.gain_db_at(theta_deg, phi_deg),
-        )
-        if directional_target["beamwidth_deg"] is not None:
+    if pattern_target is not None:
+        theta_deg = pattern_target["theta_deg"]
+        summary["target_theta_deg"] = theta_deg
+        if pattern_target["mode"] == "ring":
+            ring = result.azimuth_ring_metrics(theta_deg)
+            summary.update(
+                ring_sampled_theta_deg=ring.sampled_theta_deg,
+                ring_min_gain_dbi=ring.min_gain_dbi,
+                ring_p10_gain_dbi=ring.p10_gain_dbi,
+                ring_mean_gain_dbi=ring.mean_gain_dbi,
+                ring_p90_gain_dbi=ring.p90_gain_dbi,
+                ring_peak_gain_dbi=ring.peak_gain_dbi,
+                ring_ripple_p90_p10_db=ring.ripple_p90_p10_db,
+                ring_peak_to_null_db=ring.peak_to_null_db,
+            )
+            if pattern_target["beamwidth_deg"] is not None:
+                summary.update(
+                    target_beamwidth_deg=pattern_target["beamwidth_deg"],
+                    ring_beamwidth_deg=result.azimuth_ring_beamwidth_deg(
+                        theta_deg
+                    ),
+                )
+        else:
+            phi_deg = pattern_target["phi_deg"]
+            summary.update(
+                target_phi_deg=phi_deg,
+                target_gain_dbi=result.gain_db_at(theta_deg, phi_deg),
+            )
+        if (
+            pattern_target["mode"] == "directional"
+            and pattern_target["beamwidth_deg"] is not None
+        ):
             elevation_width, azimuth_width = result.directional_beamwidths_deg(
                 theta_deg,
                 phi_deg,
             )
             summary.update(
-                target_beamwidth_deg=directional_target["beamwidth_deg"],
+                target_beamwidth_deg=pattern_target["beamwidth_deg"],
                 elevation_beamwidth_deg=elevation_width,
                 azimuth_beamwidth_deg=azimuth_width,
             )
@@ -143,12 +174,27 @@ def print_summary(name: str, summary: dict, frequency_hz: float) -> None:
             f"theta {summary['target_theta_deg']:.2f} deg, "
             f"phi {summary['target_phi_deg']:.2f} deg"
         )
-    if "target_beamwidth_deg" in summary:
+    if "ring_p10_gain_dbi" in summary:
         print(
-            f"Target HPBW     : {summary['target_beamwidth_deg']:.2f} deg; "
-            f"measured elevation {summary['elevation_beamwidth_deg']:.2f} deg, "
-            f"azimuth {summary['azimuth_beamwidth_deg']:.2f} deg"
+            f"Ring target     : theta {summary['target_theta_deg']:.2f} deg, "
+            f"all phi; P10 {summary['ring_p10_gain_dbi']:.3f} dBi, "
+            f"minimum {summary['ring_min_gain_dbi']:.3f} dBi, "
+            f"ripple {summary['ring_ripple_p90_p10_db']:.3f} dB"
         )
+    if "target_beamwidth_deg" in summary:
+        if "ring_beamwidth_deg" in summary:
+            print(
+                f"Ring HPBW       : target "
+                f"{summary['target_beamwidth_deg']:.2f} deg; measured "
+                f"{summary['ring_beamwidth_deg']:.2f} deg"
+            )
+        else:
+            print(
+                f"Target HPBW     : {summary['target_beamwidth_deg']:.2f} deg; "
+                f"measured elevation "
+                f"{summary['elevation_beamwidth_deg']:.2f} deg, "
+                f"azimuth {summary['azimuth_beamwidth_deg']:.2f} deg"
+            )
     print(f"Antenna height  : {summary['antenna_height_m']*1e3:.2f} mm")
     print(
         f"Mesh            : {summary['mesh_nodes']} nodes, "
@@ -386,12 +432,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     source_frequency = None
-    directional_target = None
+    pattern_target = None
     if args.result is not None:
         source_payload = json.loads(args.result.read_text(encoding="utf-8"))
         if isinstance(source_payload, dict):
             source_frequency = source_payload.get("frequency_hz")
-            directional_target = directional_target_from_payload(source_payload)
+            pattern_target = pattern_target_from_payload(source_payload)
     if args.frequency_mhz is not None:
         frequency_hz = args.frequency_mhz*1e6
     elif source_frequency is not None:
@@ -434,7 +480,7 @@ def main() -> None:
         payload["coarse"] = result_summary(
             coarse_result,
             frequency_hz,
-            directional_target,
+            pattern_target,
         )
         print_summary("coarse", payload["coarse"], frequency_hz)
 
@@ -464,7 +510,7 @@ def main() -> None:
     payload["fine"] = result_summary(
         fine_result,
         frequency_hz,
-        directional_target,
+        pattern_target,
     )
     print_summary("fine", payload["fine"], frequency_hz)
 
@@ -483,6 +529,10 @@ def main() -> None:
         if "target_gain_dbi" in fine:
             convergence["target_gain_delta_db"] = (
                 fine["target_gain_dbi"] - coarse["target_gain_dbi"]
+            )
+        if "ring_p10_gain_dbi" in fine:
+            convergence["ring_p10_delta_db"] = (
+                fine["ring_p10_gain_dbi"] - coarse["ring_p10_gain_dbi"]
             )
         payload["convergence"] = convergence
         print("\nMESH CONVERGENCE (fine - coarse)")

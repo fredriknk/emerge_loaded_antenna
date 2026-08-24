@@ -45,6 +45,15 @@ METRIC_FIELDS = (
     "target_theta_deg",
     "target_phi_deg",
     "target_gain_dbi",
+    "ring_sampled_theta_deg",
+    "ring_min_gain_dbi",
+    "ring_p10_gain_dbi",
+    "ring_mean_gain_dbi",
+    "ring_p90_gain_dbi",
+    "ring_peak_gain_dbi",
+    "ring_ripple_db",
+    "ring_peak_to_null_db",
+    "ring_beamwidth_deg",
     "peak_gain_dbi",
     "peak_theta_deg",
     "peak_phi_deg",
@@ -1321,10 +1330,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pattern",
-        choices=("horizon", "directional", "peak"),
+        choices=("horizon", "ring", "directional", "peak"),
         help=(
-            "gain objective; defaults to horizon unless a directional target "
-            "flag is supplied"
+            "gain objective; defaults to the theta-90 horizon ring, while "
+            "target theta alone selects ring and target phi selects directional"
         ),
     )
     parser.add_argument(
@@ -1332,23 +1341,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help=(
             "lobe target: spherical theta in degrees (0=+Z, 90=horizon, "
-            "180=-Z); implies --pattern directional"
+            "180=-Z); selects an omnidirectional ring unless phi is supplied"
         ),
     )
     parser.add_argument(
         "--target-phi",
         type=float,
         help=(
-            "lobe target: azimuth phi in degrees (0=+X, 90=+Y); implies "
-            "--pattern directional"
+            "lobe target: azimuth phi in degrees (0=+X, 90=+Y); selects a "
+            "single directional target"
         ),
     )
     parser.add_argument(
         "--target-beamwidth-deg",
         type=float,
         help=(
-            "HPBW goal in degrees for both orthogonal cuts through the lobe "
-            "target; implies --pattern directional"
+            "HPBW goal: elevation width for a ring target, or both orthogonal "
+            "cuts when target phi is supplied"
         ),
     )
     parser.add_argument(
@@ -1438,20 +1447,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
-    directional_target_supplied = any(
-        value is not None
-        for value in (
-            args.target_theta,
-            args.target_phi,
-            args.target_beamwidth_deg,
-        )
-    )
+    theta_supplied = args.target_theta is not None
+    phi_supplied = args.target_phi is not None
+    beamwidth_supplied = args.target_beamwidth_deg is not None
+    pattern_target_supplied = theta_supplied or phi_supplied or beamwidth_supplied
     if args.pattern is None:
-        args.pattern = "directional" if directional_target_supplied else "horizon"
-    elif args.pattern != "directional" and directional_target_supplied:
+        if phi_supplied:
+            args.pattern = "directional"
+        elif theta_supplied or beamwidth_supplied:
+            args.pattern = "ring"
+        else:
+            args.pattern = "horizon"
+    elif args.pattern == "ring" and phi_supplied:
+        parser.error("--target-phi conflicts with --pattern ring")
+    elif args.pattern in {"horizon", "peak"} and pattern_target_supplied:
         parser.error(
             "--target-theta, --target-phi, and --target-beamwidth-deg conflict "
-            "with a non-directional --pattern"
+            f"with --pattern {args.pattern}"
         )
     if args.target_theta is None:
         args.target_theta = 90.0
@@ -1471,12 +1483,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-theta must be finite and between 0 and 180")
     if not np.isfinite(args.target_phi):
         parser.error("--target-phi must be finite")
+    beamwidth_limit = 180.0 if args.pattern == "ring" else 360.0
     if args.target_beamwidth_deg is not None and (
         not np.isfinite(args.target_beamwidth_deg)
-        or not 0 < args.target_beamwidth_deg <= 360
+        or not 0 < args.target_beamwidth_deg <= beamwidth_limit
     ):
         parser.error(
-            "--target-beamwidth-deg must be finite and between 0 and 360"
+            "--target-beamwidth-deg must be finite and between 0 and "
+            f"{beamwidth_limit:g} for {args.pattern} mode"
         )
     args.frequency_hz = args.frequency_mhz * 1e6
     frequency_scale = REFERENCE_DESIGN_FREQUENCY_HZ / args.frequency_hz
@@ -2262,6 +2276,8 @@ def run_campaign(args: argparse.Namespace) -> None:
             f"Gain direction  : theta {args.target_theta:g} deg, "
             f"phi {args.target_phi:g} deg"
         )
+    elif args.pattern == "ring":
+        print(f"Gain ring       : theta {args.target_theta:g} deg, all phi angles")
     print(f"Match samples   : {low_mhz:g}, {args.frequency_mhz:g} and {high_mhz:g} MHz")
     print(
         f"Match objective : limit {args.s11_limit_db:g} dB; margin reward to "
@@ -2271,16 +2287,21 @@ def run_campaign(args: argparse.Namespace) -> None:
         f"Confirmation    : {args.confirmation_runs} runs, score tolerance "
         f"{args.confirmation_score_tolerance:g}"
     )
-    if args.pattern == "horizon":
+    if args.pattern in {"horizon", "ring"}:
         print(
-            f"Pattern limits  : horizon min "
+            f"Pattern limits  : azimuth-ring min "
             f"{args.minimum_horizon_gain_dbi:.1f} dBi, "
             f"P90-P10 ripple {args.maximum_ripple_db:.1f} dB"
         )
     if args.target_beamwidth_deg is not None:
+        beamwidth_description = (
+            "azimuthal-P10 elevation profile"
+            if args.pattern == "ring"
+            else "both orthogonal cuts"
+        )
         print(
-            f"Beamwidth goal  : {args.target_beamwidth_deg:g} deg HPBW on both "
-            f"orthogonal cuts, weight {args.beamwidth_weight:g}"
+            f"Beamwidth goal  : {args.target_beamwidth_deg:g} deg HPBW on "
+            f"{beamwidth_description}, weight {args.beamwidth_weight:g}"
         )
     height_wavelengths = (
         args.maximum_height_mm * 1e-3 / free_space_wavelength(frequency_hz)

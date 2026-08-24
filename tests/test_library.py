@@ -32,6 +32,8 @@ from emerge_loaded_antenna import (
     validate_convergence_certificate,
 )
 from emerge_loaded_antenna.simulation import (
+    _azimuth_ring_beamwidth_deg,
+    _azimuth_ring_metrics,
     _configure_solver,
     _directional_beamwidths_deg,
 )
@@ -50,6 +52,16 @@ def _robust_result(
         peak_theta_deg=90.0,
         peak_phi_deg=0.0,
     )
+    ring = SimpleNamespace(
+        sampled_theta_deg=100.0,
+        min_gain_dbi=3.0,
+        p10_gain_dbi=useful_gain_dbi,
+        mean_gain_dbi=useful_gain_dbi + 0.2,
+        p90_gain_dbi=useful_gain_dbi + 1.0,
+        peak_gain_dbi=useful_gain_dbi + 1.1,
+        ripple_p90_p10_db=1.0,
+        peak_to_null_db=2.1,
+    )
     values = np.asarray(s11_db, dtype=float)
     return SimpleNamespace(
         peak_gain_dbi=useful_gain_dbi,
@@ -60,10 +72,33 @@ def _robust_result(
         antenna_height=0.55,
         gain_db_at=lambda theta, phi: useful_gain_dbi,
         directional_beamwidths_deg=lambda theta, phi: beamwidths_deg,
+        azimuth_ring_metrics=lambda theta: ring,
+        azimuth_ring_beamwidth_deg=lambda theta: beamwidths_deg[0],
     )
 
 
 class DesignTests(unittest.TestCase):
+    def test_azimuth_ring_metrics_and_beamwidth_follow_requested_theta(self):
+        theta_axis = np.deg2rad(np.linspace(0.0, 180.0, 181))
+        phi_axis = np.deg2rad(np.linspace(-180.0, 180.0, 361))
+        theta, phi = np.meshgrid(theta_axis, phi_axis)
+        theta_offset = np.rad2deg(theta) - 100.0
+        azimuth_ripple = 0.5*np.cos(2.0*phi)
+        gain_db = -3.0*(theta_offset/20.0)**2 + azimuth_ripple
+        farfield = SimpleNamespace(
+            theta=theta,
+            phi=phi,
+            normE=10**(gain_db/20.0),
+        )
+
+        ring = _azimuth_ring_metrics(farfield, 100.0)
+        beamwidth = _azimuth_ring_beamwidth_deg(farfield, 100.0)
+
+        self.assertEqual(ring.sampled_theta_deg, 100.0)
+        self.assertGreater(ring.p10_gain_dbi, ring.min_gain_dbi)
+        self.assertLess(ring.p10_gain_dbi, ring.mean_gain_dbi)
+        self.assertAlmostEqual(beamwidth, 40.0, places=6)
+
     def test_directional_beamwidths_measure_orthogonal_great_circle_cuts(self):
         theta_axis = np.deg2rad(np.linspace(0.0, 180.0, 181))
         phi_axis = np.deg2rad(np.linspace(-180.0, 180.0, 361))
@@ -572,7 +607,7 @@ class DesignTests(unittest.TestCase):
             ((-15.0, -14.0, -13.0), 2.0),
         )
 
-        for pattern_mode in ("horizon", "directional", "peak"):
+        for pattern_mode in ("horizon", "ring", "directional", "peak"):
             for s11_values, expected_margin in cases:
                 with self.subTest(
                     pattern_mode=pattern_mode,
@@ -631,6 +666,32 @@ class DesignTests(unittest.TestCase):
         )
         self.assertAlmostEqual(record.metrics["beamwidth_penalty"], 5.0)
         self.assertEqual(record.metrics["pattern_penalty"], 0.0)
+
+    def test_ring_objective_uses_azimuth_p10_and_elevation_beamwidth(self):
+        space = DesignSpace(
+            AntennaDesign(),
+            (DesignVariable("straight_lengths.1", 180e-3, 260e-3),),
+        )
+        objective = RobustGainObjective(
+            space,
+            pattern_mode="ring",
+            target_theta_deg=100.0,
+            target_beamwidth_deg=70.0,
+            beamwidth_weight=2.0,
+        )
+
+        with patch(
+            "emerge_loaded_antenna.optimize.simulate",
+            return_value=_robust_result(beamwidths_deg=(60.0, 90.0)),
+        ):
+            score = objective((220e-3,))
+
+        record = objective.best_record
+        self.assertAlmostEqual(score, -2.0)
+        self.assertEqual(record.metrics["ring_p10_gain_dbi"], 4.0)
+        self.assertEqual(record.metrics["ring_beamwidth_deg"], 60.0)
+        self.assertEqual(record.metrics["beamwidth_error_deg"], -10.0)
+        self.assertAlmostEqual(record.metrics["beamwidth_penalty"], 2.0)
 
     def test_robust_objective_confirms_and_quarantines_new_incumbents(self):
         space = DesignSpace(
@@ -751,7 +812,7 @@ class DesignTests(unittest.TestCase):
             RobustGainObjective(space, s11_margin_target_db=-9.0)
         with self.assertRaisesRegex(ValueError, "maximum_s11_db must be finite"):
             RobustGainObjective(space, maximum_s11_db=float("nan"))
-        with self.assertRaisesRegex(ValueError, "requires directional"):
+        with self.assertRaisesRegex(ValueError, "requires ring or directional"):
             RobustGainObjective(space, target_beamwidth_deg=60.0)
         with self.assertRaisesRegex(ValueError, "between 0 and 360"):
             RobustGainObjective(

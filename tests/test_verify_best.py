@@ -7,16 +7,16 @@ from unittest.mock import patch
 
 from emerge_loaded_antenna import AntennaDesign, MeshSettings
 from examples.verify_best import (
-    directional_target_from_payload,
     export_fabrication_artifacts,
     options,
     parse_args,
+    pattern_target_from_payload,
 )
 
 
 class VerifyBestTests(unittest.TestCase):
     def test_directional_target_is_recovered_from_campaign_metadata(self):
-        target = directional_target_from_payload(
+        target = pattern_target_from_payload(
             {
                 "simulation": {
                     "objective": {
@@ -31,12 +31,41 @@ class VerifyBestTests(unittest.TestCase):
 
         self.assertEqual(
             target,
-            {"theta_deg": 100.0, "phi_deg": 20.0, "beamwidth_deg": 55.0},
+            {
+                "mode": "directional",
+                "theta_deg": 100.0,
+                "phi_deg": 20.0,
+                "beamwidth_deg": 55.0,
+            },
         )
         self.assertIsNone(
-            directional_target_from_payload(
+            pattern_target_from_payload(
                 {"simulation": {"objective": {"pattern_mode": "horizon"}}}
             )
+        )
+
+    def test_ring_target_is_recovered_without_phi(self):
+        target = pattern_target_from_payload(
+            {
+                "simulation": {
+                    "objective": {
+                        "pattern_mode": "ring",
+                        "target_theta_deg": 100.0,
+                        "target_phi_deg": 45.0,
+                        "target_beamwidth_deg": 50.0,
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(
+            target,
+            {
+                "mode": "ring",
+                "theta_deg": 100.0,
+                "phi_deg": None,
+                "beamwidth_deg": 50.0,
+            },
         )
 
     def test_fabrication_flags_are_parsed(self):

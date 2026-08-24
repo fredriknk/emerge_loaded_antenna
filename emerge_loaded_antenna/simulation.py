@@ -105,6 +105,27 @@ class FarFieldMetrics:
         }
 
 
+@dataclass(frozen=True)
+class AzimuthRingMetrics:
+    """Gain statistics around one constant-theta azimuth ring."""
+
+    target_theta_deg: float
+    sampled_theta_deg: float
+    min_gain_dbi: float
+    p10_gain_dbi: float
+    mean_gain_dbi: float
+    p90_gain_dbi: float
+    peak_gain_dbi: float
+    ripple_p90_p10_db: float
+    peak_to_null_db: float
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            field: float(value)
+            for field, value in self.__dict__.items()
+        }
+
+
 @dataclass
 class SimulationResult:
     """Numerical result returned to scripts and optimizers."""
@@ -148,6 +169,18 @@ class SimulationResult:
         index = np.unravel_index(int(np.argmin(distance)), distance.shape)
         amplitude = abs(np.asarray(self.farfield_3d.normE)[index]/em.lib.EISO)
         return float(20*np.log10(max(amplitude, 1e-12)))
+
+    def azimuth_ring_metrics(self, theta_deg: float) -> AzimuthRingMetrics:
+        """Return gain statistics across every azimuth at one theta."""
+        if self.farfield_3d is None:
+            raise RuntimeError("far-field gain was not computed")
+        return _azimuth_ring_metrics(self.farfield_3d, theta_deg)
+
+    def azimuth_ring_beamwidth_deg(self, theta_deg: float) -> float:
+        """Return elevation HPBW of the azimuthal-P10 ring profile."""
+        if self.farfield_3d is None:
+            raise RuntimeError("far-field gain was not computed")
+        return _azimuth_ring_beamwidth_deg(self.farfield_3d, theta_deg)
 
     def directional_beamwidths_deg(
         self,
@@ -331,6 +364,105 @@ def _directional_beamwidths_deg(
     return elevation_width, azimuth_width
 
 
+def _azimuth_ring_data(
+    farfield: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return theta samples and gain with the duplicate azimuth removed."""
+    theta = np.asarray(farfield.theta, dtype=float)
+    phi = np.asarray(farfield.phi, dtype=float)
+    gain_amplitude = np.abs(np.asarray(farfield.normE)/em.lib.EISO)
+    gain_db = 20*np.log10(np.maximum(gain_amplitude, 1e-12))
+    if theta.ndim != 2 or phi.shape != theta.shape or gain_db.shape != theta.shape:
+        raise ValueError("far-field theta, phi, and gain grids must have equal shape")
+    theta_axis = np.asarray(theta[0, :], dtype=float)
+    phi_axis = np.asarray(phi[:, 0], dtype=float)
+    if phi_axis.size > 1 and np.isclose(
+        np.angle(np.exp(1j*(phi_axis[-1] - phi_axis[0]))),
+        0.0,
+    ):
+        gain_db = gain_db[:-1, :]
+    return theta_axis, gain_db
+
+
+def _azimuth_ring_metrics(
+    farfield: Any,
+    theta_deg: float,
+) -> AzimuthRingMetrics:
+    """Measure azimuthal gain statistics at the nearest sampled theta."""
+    if not np.isfinite(theta_deg) or not 0 <= theta_deg <= 180:
+        raise ValueError("theta_deg must be finite and between 0 and 180")
+    theta_axis, gain_db = _azimuth_ring_data(farfield)
+    theta_target = np.deg2rad(theta_deg)
+    theta_index = int(np.argmin(np.abs(theta_axis - theta_target)))
+    ring_gain = np.asarray(gain_db[:, theta_index], dtype=float)
+    p10 = float(np.nanpercentile(ring_gain, 10))
+    p90 = float(np.nanpercentile(ring_gain, 90))
+    mean = float(10*np.log10(np.nanmean(10**(ring_gain/10))))
+    minimum = float(np.nanmin(ring_gain))
+    peak = float(np.nanmax(ring_gain))
+    return AzimuthRingMetrics(
+        target_theta_deg=float(theta_deg),
+        sampled_theta_deg=float(np.rad2deg(theta_axis[theta_index])),
+        min_gain_dbi=minimum,
+        p10_gain_dbi=p10,
+        mean_gain_dbi=mean,
+        p90_gain_dbi=p90,
+        peak_gain_dbi=peak,
+        ripple_p90_p10_db=p90 - p10,
+        peak_to_null_db=peak - minimum,
+    )
+
+
+def _azimuth_ring_beamwidth_deg(farfield: Any, theta_deg: float) -> float:
+    """Measure HPBW of the azimuthal-P10 profile around a target theta."""
+    if not np.isfinite(theta_deg) or not 0 <= theta_deg <= 180:
+        raise ValueError("theta_deg must be finite and between 0 and 180")
+    theta_axis_rad, gain_db = _azimuth_ring_data(farfield)
+    theta_axis = np.rad2deg(theta_axis_rad)
+    profile = np.nanpercentile(gain_db, 10, axis=0)
+    center = int(np.argmin(np.abs(theta_axis - theta_deg)))
+    if not np.isfinite(profile[center]):
+        raise RuntimeError("azimuth ring target gain was not finite")
+    threshold = profile[center] - 3.0
+    above = np.isfinite(profile) & (profile >= threshold)
+
+    left_inside = center
+    while left_inside > 0 and above[left_inside - 1]:
+        left_inside -= 1
+    right_inside = center
+    while right_inside + 1 < above.size and above[right_inside + 1]:
+        right_inside += 1
+
+    def crossing(inside: int, outside: int) -> float:
+        inside_gain = profile[inside]
+        outside_gain = profile[outside]
+        if not np.isfinite(outside_gain) or np.isclose(inside_gain, outside_gain):
+            return float(theta_axis[inside])
+        fraction = float(
+            np.clip(
+                (threshold - inside_gain)/(outside_gain - inside_gain),
+                0.0,
+                1.0,
+            )
+        )
+        return float(
+            theta_axis[inside]
+            + fraction*(theta_axis[outside] - theta_axis[inside])
+        )
+
+    left = (
+        float(theta_axis[0])
+        if left_inside == 0
+        else crossing(left_inside, left_inside - 1)
+    )
+    right = (
+        float(theta_axis[-1])
+        if right_inside == above.size - 1
+        else crossing(right_inside, right_inside + 1)
+    )
+    return right - left
+
+
 def _farfield_metrics(
     farfield: Any,
     frequency: float,
@@ -345,18 +477,7 @@ def _farfield_metrics(
     peak_theta = float(np.rad2deg(theta[peak_index]))
     peak_phi = float(np.rad2deg(phi[peak_index]))
 
-    horizon_index = int(np.argmin(np.abs(theta[0, :] - np.pi/2)))
-    horizon_gain = np.asarray(gain_db[:, horizon_index], dtype=float)
-    # -180 and +180 degrees are the same direction; do not double-count it.
-    if horizon_gain.size > 1:
-        horizon_gain = horizon_gain[:-1]
-    horizon_p10 = float(np.nanpercentile(horizon_gain, 10))
-    horizon_p90 = float(np.nanpercentile(horizon_gain, 90))
-    horizon_mean = float(
-        10*np.log10(np.nanmean(10**(horizon_gain/10)))
-    )
-    horizon_min = float(np.nanmin(horizon_gain))
-    horizon_peak = float(np.nanmax(horizon_gain))
+    horizon = _azimuth_ring_metrics(farfield, 90.0)
 
     return FarFieldMetrics(
         frequency_hz=float(frequency),
@@ -365,13 +486,13 @@ def _farfield_metrics(
         peak_theta_deg=peak_theta,
         peak_phi_deg=peak_phi,
         peak_elevation_deg=90.0 - peak_theta,
-        horizon_min_gain_dbi=horizon_min,
-        horizon_p10_gain_dbi=horizon_p10,
-        horizon_mean_gain_dbi=horizon_mean,
-        horizon_p90_gain_dbi=horizon_p90,
-        horizon_peak_gain_dbi=horizon_peak,
-        horizon_ripple_p90_p10_db=horizon_p90 - horizon_p10,
-        horizon_peak_to_null_db=horizon_peak - horizon_min,
+        horizon_min_gain_dbi=horizon.min_gain_dbi,
+        horizon_p10_gain_dbi=horizon.p10_gain_dbi,
+        horizon_mean_gain_dbi=horizon.mean_gain_dbi,
+        horizon_p90_gain_dbi=horizon.p90_gain_dbi,
+        horizon_peak_gain_dbi=horizon.peak_gain_dbi,
+        horizon_ripple_p90_p10_db=horizon.ripple_p90_p10_db,
+        horizon_peak_to_null_db=horizon.peak_to_null_db,
     )
 
 

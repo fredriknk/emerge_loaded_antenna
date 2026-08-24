@@ -46,6 +46,7 @@ from .presets import (
 )
 from .serialization import design_from_dict, load_design, save_design
 from .simulation import (
+    AzimuthRingMetrics,
     FarFieldMetrics,
     ModelArtifacts,
     SimulationResult,
@@ -62,6 +63,7 @@ __all__ = [
     "SOLVER_CHOICES",
     "AntennaDesign",
     "AntennaPath",
+    "AzimuthRingMetrics",
     "CoilDesign",
     "CompositeCurve",
     "ConfirmationCallback",
