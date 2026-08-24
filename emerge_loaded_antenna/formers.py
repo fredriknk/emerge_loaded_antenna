@@ -437,13 +437,15 @@ def export_coil_formers(
     gauge_mark_depth: float = 1.0e-3,
     stl_mesh_size: float | None = None,
 ) -> Path:
-    """Export grooved coil formers to one STEP or STL file.
+    """Export antenna forming tools to one STEP or STL file.
 
     Each former has the coil centerline diameter before the wire-sized groove
     is subtracted.  ``extra_length`` is split equally above and below the coil.
     Multiple tools are placed side-by-side with ``spacing`` between blanks.
     By default, each coil also gets an inside-diameter sizing mandrel with only
     a shallow guide groove for correcting spring-back by hand.
+    The radial angle gauge is independent of the coils, so a design without
+    coils exports the gauge by itself when ``include_radial_gauge`` is true.
     """
     destination = Path(output)
     if destination.suffix.lower() not in {".step", ".stp", ".stl"}:
@@ -455,8 +457,8 @@ def export_coil_formers(
         groove_clearance=groove_clearance,
         spacing=spacing,
     )
-    if not dimensions:
-        raise ValueError("at least one coil is required to export a former")
+    if not dimensions and not include_radial_gauge:
+        raise ValueError("at least one coil or the radial gauge is required")
     if stl_mesh_size is not None and stl_mesh_size <= 0:
         raise ValueError("stl_mesh_size must be positive")
     if sizing_groove_depth < 0:
@@ -551,10 +553,11 @@ def export_coil_formers(
         gmsh.model.occ.synchronize()
 
         if destination.suffix.lower() == ".stl":
-            mesh_size = stl_mesh_size or min(
-                design.wire_radius / 3.0,
-                min(coil.pitch for coil in design.coils) / 12.0,
+            automatic_mesh_sizes = [design.wire_radius / 3.0]
+            automatic_mesh_sizes.extend(
+                coil.pitch / 12.0 for coil in design.coils
             )
+            mesh_size = stl_mesh_size or min(automatic_mesh_sizes)
             gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size)
             gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size)
             gmsh.model.mesh.generate(2)

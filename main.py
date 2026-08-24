@@ -22,6 +22,7 @@ from emerge_loaded_antenna import (
     MeshSettings,
     SimulationOptions,
     simulate,
+    design_from_dict
 )
 from emerge_loaded_antenna.drawing import export_drawing
 from emerge_loaded_antenna.formers import export_coil_formers
@@ -32,31 +33,20 @@ F0 = 869.5*MHz
 
 # Deliberately static example: every physical dimension is visible here and
 # remains unchanged if the packaged optimizer reference is updated.
-DESIGN = AntennaDesign(
-    wire_radius=0.8*mm,
-    radial_length=100*mm,
-    radial_angle_deg=30.1,
-    radial_count=4,
-    straight_lengths=(96*mm, 75*mm, 112*mm),
-    coils=(
-        CoilDesign(
-            radius=15.0*mm,
-            turns=1,
-            pitch=7.45*mm,
-            transition=6.0*mm,
-            handedness="RH",
-        ),
-        CoilDesign(
-            radius=9.75*mm,
-            turns=1,
-            pitch=6.08*mm,
-            transition=6.0*mm,
-            handedness="RH",
-        ),
-    ),
-    port_height=2.0*mm,
-    port_impedance=50.0,
-)
+
+DESIGN = design_from_dict({
+    "wire_radius": 0.0008,
+    "radial_length": 0.09833394357975579,
+    "radial_angle_deg": 19.20521089494316,
+    "radial_count": 4,
+    "straight_lengths": [
+      0.0670496407920941
+    ],
+    "coils": [],
+    "port_height": 0.0019965497412305923,
+    "port_impedance": 50.0
+  })
+
 DESIGN.validate()
 
 RUN_SOLVER = True

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import gmsh
+import pytest
 from test_drawing import example_design
 
 from emerge_loaded_antenna.formers import (
@@ -56,3 +58,57 @@ def test_step_export_contains_coil_tools_and_radial_gauge(tmp_path):
                 gmsh.model.setCurrent(previous_model)
             if owns_gmsh:
                 gmsh.finalize()
+
+
+def test_zero_coil_design_exports_radial_gauge_by_itself(tmp_path):
+    design = replace(
+        example_design(),
+        coils=(),
+        straight_lengths=(sum(example_design().straight_lengths),),
+    )
+    destination = export_coil_formers(design, tmp_path / "radial_gauge.step")
+
+    owns_gmsh = not bool(gmsh.isInitialized())
+    previous_model = ""
+    if owns_gmsh:
+        gmsh.initialize()
+    else:
+        previous_model = gmsh.model.getCurrent()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("radial_gauge_import_check")
+        gmsh.model.occ.importShapes(str(destination.resolve()))
+        gmsh.model.occ.synchronize()
+        assert len(gmsh.model.getEntities(3)) == 1
+    finally:
+        if gmsh.isInitialized():
+            if gmsh.model.getCurrent() == "radial_gauge_import_check":
+                gmsh.model.remove()
+            if previous_model:
+                gmsh.model.setCurrent(previous_model)
+            if owns_gmsh:
+                gmsh.finalize()
+
+
+def test_zero_coil_design_requires_radial_gauge(tmp_path):
+    design = replace(example_design(), coils=(), straight_lengths=(0.3,))
+
+    with pytest.raises(ValueError, match="at least one coil or the radial gauge"):
+        export_coil_formers(
+            design,
+            tmp_path / "empty.step",
+            include_radial_gauge=False,
+        )
+
+
+def test_zero_coil_design_exports_radial_gauge_as_stl(tmp_path):
+    design = replace(example_design(), coils=(), straight_lengths=(0.3,))
+
+    destination = export_coil_formers(
+        design,
+        tmp_path / "radial_gauge.stl",
+        stl_mesh_size=2e-3,
+    )
+
+    assert destination.exists()
+    assert destination.stat().st_size > 1_000
