@@ -48,6 +48,7 @@ from examples.optimize_gain import (
     parse_args,
     parse_coil_counts,
     parse_turn_cases,
+    progress_goal_text,
     resolve_topology,
     restart_seed,
     run_automatic_pipeline,
@@ -60,6 +61,68 @@ from examples.optimize_gain import (
 
 
 class CampaignTests(unittest.TestCase):
+    def test_progress_goal_text_follows_active_ring_and_beamwidth(self):
+        record = EvaluationRecord(
+            (1.0,),
+            2.0,
+            -11.0,
+            5.0,
+            metrics={
+                "ring_p10_gain_dbi": -7.65,
+                "ring_sampled_theta_deg": 134.0,
+                "ring_beamwidth_deg": 48.0,
+                "horizon_p10_gain_dbi": 5.15,
+            },
+        )
+
+        text = progress_goal_text(
+            record,
+            {
+                "objective": {
+                    "pattern_mode": "ring",
+                    "target_theta_deg": 135.0,
+                    "target_beamwidth_deg": 50.0,
+                }
+            },
+        )
+
+        self.assertIn("Ring P10 -7.65 dBi", text)
+        self.assertIn("@ 134 deg (goal 135 deg)", text)
+        self.assertIn("BW 48 deg (goal 50 deg)", text)
+        self.assertNotIn("Horizon", text)
+
+    def test_progress_goal_text_follows_directional_and_peak_modes(self):
+        directional = EvaluationRecord(
+            (1.0,),
+            -2.0,
+            -12.0,
+            6.0,
+            metrics={
+                "target_gain_dbi": 4.25,
+                "elevation_beamwidth_deg": 55.0,
+                "azimuth_beamwidth_deg": 62.0,
+            },
+        )
+        directional_text = progress_goal_text(
+            directional,
+            {
+                "objective": {
+                    "pattern_mode": "directional",
+                    "target_theta_deg": 70.0,
+                    "target_phi_deg": 25.0,
+                    "target_beamwidth_deg": 60.0,
+                }
+            },
+        )
+        peak_text = progress_goal_text(
+            directional,
+            {"objective": {"pattern_mode": "peak"}},
+        )
+
+        self.assertIn("Target gain  4.25 dBi @ theta 70, phi 25 deg", directional_text)
+        self.assertIn("BW el/az 55/62 deg (goal 60 deg)", directional_text)
+        self.assertEqual(peak_text, "Peak gain  6.00 dBi")
+
     def test_automatic_polish_reserve_covers_smallest_topology_population(self):
         with patch(
             "sys.argv",

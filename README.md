@@ -881,6 +881,11 @@ metrics, numerical settings, fixed wire diameter, and candidate/simulation
 counts. It can be passed directly to `--warm-start`, `verify_best.py`,
 `check_open_region.py`, or `load_design()`.
 
+Live progress follows the selected objective: horizon P10, requested-theta ring
+P10, requested theta/phi directional gain, or peak gain. It also shows the S11
+limit and any active beamwidth goal instead of reporting horizon defaults for
+every mode.
+
 ### Optimizer option reference
 
 Run `python examples/optimize_gain.py --help` for the authoritative CLI. The

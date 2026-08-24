@@ -1080,6 +1080,67 @@ def result_payload(
     return payload
 
 
+def progress_goal_text(
+    record: EvaluationRecord,
+    simulation_metadata: dict | None,
+) -> str:
+    """Format the active pattern goal for live campaign reporting."""
+    objective = (
+        simulation_metadata.get("objective", {})
+        if isinstance(simulation_metadata, dict)
+        else {}
+    )
+    mode = objective.get("pattern_mode", "horizon")
+    metrics = record.metrics
+    if mode == "ring":
+        target_theta = float(objective.get("target_theta_deg", 90.0))
+        sampled_theta = float(
+            metrics.get("ring_sampled_theta_deg", target_theta)
+        )
+        text = (
+            f"Ring P10 {metrics.get('ring_p10_gain_dbi', float('nan')):5.2f} "
+            f"dBi @ {sampled_theta:g} deg (goal {target_theta:g} deg)"
+        )
+        beamwidth_goal = objective.get("target_beamwidth_deg")
+        if beamwidth_goal is not None and "ring_beamwidth_deg" in metrics:
+            text += (
+                f" | BW {metrics['ring_beamwidth_deg']:g} deg "
+                f"(goal {float(beamwidth_goal):g} deg)"
+            )
+        return text
+    if mode == "directional":
+        target_theta = float(objective.get("target_theta_deg", 90.0))
+        target_phi = float(objective.get("target_phi_deg", 0.0))
+        text = (
+            f"Target gain {metrics.get('target_gain_dbi', float('nan')):5.2f} "
+            f"dBi @ theta {target_theta:g}, phi {target_phi:g} deg"
+        )
+        beamwidth_goal = objective.get("target_beamwidth_deg")
+        if (
+            beamwidth_goal is not None
+            and "elevation_beamwidth_deg" in metrics
+            and "azimuth_beamwidth_deg" in metrics
+        ):
+            text += (
+                f" | BW el/az {metrics['elevation_beamwidth_deg']:g}/"
+                f"{metrics['azimuth_beamwidth_deg']:g} deg "
+                f"(goal {float(beamwidth_goal):g} deg)"
+            )
+        return text
+    if mode == "peak":
+        peak_gain = (
+            float(record.peak_gain_dbi)
+            if record.peak_gain_dbi is not None
+            else float("nan")
+        )
+        return f"Peak gain {peak_gain:5.2f} dBi"
+    return (
+        "Horizon P10 "
+        f"{metrics.get('horizon_p10_gain_dbi', float('nan')):5.2f} dBi "
+        "@ 90 deg"
+    )
+
+
 class CampaignProgress:
     """Persistent evaluation log and concise whole-campaign reporting."""
 
@@ -1281,9 +1342,9 @@ class CampaignProgress:
             metrics = self.best.metrics
             result_text = (
                 f"best {self.best.score:7.3f} | "
-                f"worst S11 {metrics.get('worst_s11_db', float('nan')):6.2f} | "
-                f"H10 {metrics.get('horizon_p10_gain_dbi', float('nan')):5.2f} | "
-                f"peak {self.best.peak_gain_dbi:5.2f} dBi"
+                f"S11 worst {metrics.get('worst_s11_db', float('nan')):6.2f} "
+                f"dB (goal <= {self.maximum_s11_db:g} dB) | "
+                f"{progress_goal_text(self.best, self.simulation_metadata)}"
             )
         print(
             f"[{self.candidate_count:5d}/{self.total} {100 * progress:5.1f}% | "
