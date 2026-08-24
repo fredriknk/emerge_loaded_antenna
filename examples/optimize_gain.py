@@ -3056,47 +3056,6 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                 space = schedule.space
                 run_name = f"turns_{format_turn_case(turn_case)}_seed_{seed}"
                 print(f"\nStarting {run_name}", flush=True)
-                options = SimulationOptions(
-                    sweep=FrequencySweep(
-                        center=frequency_hz,
-                        span=args.match_bandwidth_mhz * 1e6,
-                        points=3,
-                    ),
-                    mesh=mesh,
-                    open_region=open_region,
-                    solve=True,
-                    solver=args.solver,
-                    compute_farfield=True,
-                    farfield_frequency=frequency_hz,
-                    farfield_angular_step_deg=args.angular_step,
-                    verbose=False,
-                )
-                objective = RobustGainObjective(
-                    space,
-                    target_frequency=frequency_hz,
-                    pattern_mode=args.pattern,
-                    target_theta_deg=args.target_theta,
-                    target_theta_degrees=args.target_thetas,
-                    target_phi_deg=args.target_phi,
-                    target_beamwidth_deg=args.target_beamwidth_deg,
-                    beamwidth_weight=args.beamwidth_weight,
-                    maximum_s11_db=args.s11_limit_db,
-                    mismatch_weight=args.mismatch_weight,
-                    s11_margin_target_db=args.s11_margin_target_db,
-                    s11_margin_weight=args.s11_margin_weight,
-                    minimum_horizon_gain_dbi=args.minimum_horizon_gain_dbi,
-                    null_weight=args.null_weight,
-                    maximum_horizon_ripple_db=args.maximum_ripple_db,
-                    ripple_weight=args.ripple_weight,
-                    maximum_height=args.maximum_height_mm * 1e-3,
-                    height_weight=args.height_weight,
-                    options=options,
-                    on_evaluation=progress,
-                    confirmation_runs=args.confirmation_runs,
-                    confirmation_score_tolerance=(
-                        args.confirmation_score_tolerance
-                    ),
-                )
                 lower = np.asarray([bound[0] for bound in space.bounds])
                 upper = np.asarray([bound[1] for bound in space.bounds])
                 warm_vector = np.clip(space.initial_vector, lower, upper)
@@ -3153,6 +3112,47 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
                     turn_case,
                     seed,
                     initial_vector=start_vector,
+                )
+                options = SimulationOptions(
+                    sweep=FrequencySweep(
+                        center=frequency_hz,
+                        span=args.match_bandwidth_mhz * 1e6,
+                        points=3,
+                    ),
+                    mesh=mesh,
+                    open_region=open_region,
+                    solve=True,
+                    solver=args.solver,
+                    compute_farfield=True,
+                    farfield_frequency=frequency_hz,
+                    farfield_angular_step_deg=args.angular_step,
+                    verbose=False,
+                )
+                objective = RobustGainObjective(
+                    space,
+                    target_frequency=frequency_hz,
+                    pattern_mode=args.pattern,
+                    target_theta_deg=args.target_theta,
+                    target_theta_degrees=args.target_thetas,
+                    target_phi_deg=args.target_phi,
+                    target_beamwidth_deg=args.target_beamwidth_deg,
+                    beamwidth_weight=args.beamwidth_weight,
+                    maximum_s11_db=args.s11_limit_db,
+                    mismatch_weight=args.mismatch_weight,
+                    s11_margin_target_db=args.s11_margin_target_db,
+                    s11_margin_weight=args.s11_margin_weight,
+                    minimum_horizon_gain_dbi=args.minimum_horizon_gain_dbi,
+                    null_weight=args.null_weight,
+                    maximum_horizon_ripple_db=args.maximum_ripple_db,
+                    ripple_weight=args.ripple_weight,
+                    maximum_height=args.maximum_height_mm * 1e-3,
+                    height_weight=args.height_weight,
+                    options=options,
+                    on_evaluation=progress,
+                    confirmation_runs=args.confirmation_runs,
+                    confirmation_score_tolerance=(
+                        args.confirmation_score_tolerance
+                    ),
                 )
                 if args.finetune:
                     fine_result = run_finetune_optimizer(

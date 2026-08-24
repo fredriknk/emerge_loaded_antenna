@@ -1838,6 +1838,13 @@ class CampaignTests(unittest.TestCase):
             best["simulation"]["initialization"]["policy"],
             "validated_uniform_random_x0",
         )
+        np.testing.assert_allclose(
+            [
+                best["search_space"]["initial_variables"][name]
+                for name in spaces[0].names
+            ],
+            x0,
+        )
 
     def test_campaign_records_multiple_ring_targets_and_csv_metrics(self):
         objective_options = []
