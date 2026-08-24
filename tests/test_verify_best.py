@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +16,7 @@ from emerge_loaded_antenna import (
 )
 from examples.verify_best import (
     export_fabrication_artifacts,
+    latest_optimizer_result,
     options,
     parse_args,
     pattern_target_from_payload,
@@ -24,6 +26,61 @@ from examples.verify_best import (
 
 
 class VerifyBestTests(unittest.TestCase):
+    def test_latest_optimizer_result_uses_newest_campaign_winner(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "optimization_results"
+            old = root / "old_run" / "campaign_best.json"
+            new = root / "new_run" / "campaign_best.json"
+            ignored = root / "newer_run" / "turns_1x1_best.json"
+            for path in (old, new, ignored):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+            os.utime(old, (1_000_000_000, 1_000_000_000))
+            os.utime(new, (1_100_000_000, 1_100_000_000))
+            os.utime(ignored, (1_200_000_000, 1_200_000_000))
+
+            selected = latest_optimizer_result(root)
+
+        self.assertEqual(selected, new)
+
+    def test_latest_cli_resolves_result_and_default_output(self):
+        selected = Path("optimization_results/new_run/campaign_best.json")
+        with (
+            patch("sys.argv", ["verify_best.py", "--latest"]),
+            patch(
+                "examples.verify_best.latest_optimizer_result",
+                return_value=selected,
+            ) as latest,
+        ):
+            args = parse_args()
+
+        latest.assert_called_once_with()
+        self.assertEqual(args.result, selected)
+        self.assertEqual(
+            args.output,
+            Path("optimization_results/new_run/campaign_best_verification"),
+        )
+
+    def test_latest_cli_rejects_explicit_result_and_missing_results(self):
+        with (
+            patch(
+                "sys.argv",
+                ["verify_best.py", "design.json", "--latest"],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
+        with (
+            patch("sys.argv", ["verify_best.py", "--latest"]),
+            patch(
+                "examples.verify_best.latest_optimizer_result",
+                side_effect=FileNotFoundError("no campaign winners"),
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
     def test_directional_target_is_recovered_from_campaign_metadata(self):
         target = pattern_target_from_payload(
             {

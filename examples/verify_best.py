@@ -563,6 +563,29 @@ def options(
     )
 
 
+def latest_optimizer_result(
+    root: Path = Path("optimization_results"),
+) -> Path:
+    """Return the most recently modified campaign-wide optimizer winner."""
+    if not root.is_dir():
+        raise FileNotFoundError(
+            f"optimizer result directory does not exist: {root.resolve()}"
+        )
+    candidates = tuple(
+        path
+        for path in root.rglob("campaign_best.json")
+        if path.is_file()
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"no campaign_best.json files found under {root.resolve()}"
+        )
+    return max(
+        candidates,
+        key=lambda path: (path.stat().st_mtime_ns, str(path.resolve())),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -571,6 +594,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "design or optimizer result; defaults to a generated reference"
+        ),
+    )
+    parser.add_argument(
+        "--latest",
+        action="store_true",
+        help=(
+            "use the most recently modified campaign_best.json anywhere "
+            "under optimization_results"
         ),
     )
     parser.add_argument(
@@ -615,6 +646,13 @@ def parse_args() -> argparse.Namespace:
         help="export coil formers, sizing mandrels, and a radial gauge as STEP",
     )
     args = parser.parse_args()
+    if args.latest and args.result is not None:
+        parser.error("provide either an explicit result path or --latest, not both")
+    if args.latest:
+        try:
+            args.result = latest_optimizer_result()
+        except FileNotFoundError as error:
+            parser.error(str(error))
     if args.frequency_mhz is not None and (
         not np.isfinite(args.frequency_mhz) or args.frequency_mhz <= 0
     ):
@@ -636,6 +674,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.latest:
+        print(f"Latest result     : {args.result.resolve()}")
     source_frequency = None
     pattern_target = None
     source_payload = None

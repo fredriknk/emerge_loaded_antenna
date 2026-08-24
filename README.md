@@ -1087,6 +1087,21 @@ the fabrication sheet and printable coil-winding jigs from the verified design:
     --jig-models
 ```
 
+Use `--latest` to verify the most recently updated campaign winner without
+copying its path:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\verify_best.py `
+    --latest `
+    --design-sheet `
+    --jig-models
+```
+
+It searches recursively under `optimization_results` for
+`campaign_best.json` and selects the newest file by modification time. This
+also works with an in-progress campaign after it has checkpointed its first
+winner. An explicit result path and `--latest` cannot be combined.
+
 The solve frequency is inferred from optimizer metadata when possible. The
 default sweep is the wavelength-scaled equivalent of 30 MHz at 868 MHz. The
 fine mesh uses eight wire sections, a 2x antenna surface factor, 6x radial
