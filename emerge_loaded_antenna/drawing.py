@@ -727,8 +727,13 @@ def _draw_s11(ax, result: SimulationResult | None) -> None:
     ax.legend(fontsize=_font(6.5), loc="best")
 
 
-def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
-    """Return sorted horizon azimuth and realized gain from a sampled 3-D field."""
+def _azimuth_ring_gain(
+    result: SimulationResult,
+    theta_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a closed azimuth gain ring nearest a requested spherical theta."""
+    if not np.isfinite(theta_deg) or not 0.0 <= theta_deg <= 180.0:
+        raise ValueError("theta_deg must be finite and between zero and 180")
     farfield = getattr(result, "farfield_3d", None)
     if farfield is None:
         raise ValueError("far-field data is unavailable")
@@ -743,17 +748,17 @@ def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
     if not theta.size:
         raise ValueError("far-field data is empty")
 
-    theta_distance = np.abs(theta - np.pi / 2.0)
+    theta_distance = np.abs(theta - np.deg2rad(theta_deg))
     nearest_distance = float(np.nanmin(theta_distance))
-    horizon = np.isclose(theta_distance, nearest_distance, rtol=0.0, atol=1e-10)
-    phi_values = np.mod(phi[horizon], 2.0 * np.pi)
+    ring = np.isclose(theta_distance, nearest_distance, rtol=0.0, atol=1e-10)
+    phi_values = np.mod(phi[ring], 2.0 * np.pi)
 
     # EMerge's normE/EISO ratio is the realized-gain amplitude used throughout
     # the simulation and verification code.
     import emerge as em
 
     gain_values = 20.0 * np.log10(
-        np.maximum(np.abs(norm_e[horizon]) / em.lib.EISO, 1e-12)
+        np.maximum(np.abs(norm_e[ring]) / em.lib.EISO, 1e-12)
     )
     finite = np.isfinite(phi_values) & np.isfinite(gain_values)
     phi_values = phi_values[finite]
@@ -778,6 +783,11 @@ def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
         phi_values = np.append(phi_values, phi_values[0] + 2.0 * np.pi)
         gain_values = np.append(gain_values, gain_values[0])
     return phi_values, gain_values
+
+
+def _horizon_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted horizon azimuth and realized gain from a sampled 3-D field."""
+    return _azimuth_ring_gain(result, 90.0)
 
 
 def _xz_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
@@ -841,8 +851,12 @@ def _xz_gain(result: SimulationResult) -> tuple[np.ndarray, np.ndarray]:
     return cut_angles, cut_gain
 
 
-def _draw_gain_lobes(ax, result: SimulationResult | None) -> None:
-    """Draw XY/horizon and XZ/elevation gain lobes on one polar axis."""
+def _draw_gain_lobes(
+    ax,
+    result: SimulationResult | None,
+    target_ring_thetas_deg: tuple[float, ...] = (),
+) -> None:
+    """Draw principal cuts and any verified target rings on one polar axis."""
     if result is None:
         _draw_unavailable_plot(ax, "XY and XZ gain lobes")
         return
@@ -853,7 +867,22 @@ def _draw_gain_lobes(ax, result: SimulationResult | None) -> None:
         _draw_unavailable_plot(ax, "XY and XZ gain lobes")
         return
 
-    all_gain_db = np.concatenate((xy_gain_db, xz_gain_db))
+    target_thetas = tuple(
+        dict.fromkeys(float(value) for value in target_ring_thetas_deg)
+    )
+    target_curves = []
+    for theta_deg in target_thetas:
+        if math.isclose(theta_deg, 90.0, abs_tol=1e-9):
+            continue
+        try:
+            ring_phi, ring_gain_db = _azimuth_ring_gain(result, theta_deg)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        target_curves.append((theta_deg, ring_phi, ring_gain_db))
+
+    all_gain_db = np.concatenate(
+        (xy_gain_db, xz_gain_db, *(curve[2] for curve in target_curves))
+    )
     peak_gain = float(np.nanmax(all_gain_db))
     radial_floor = max(-40.0, float(math.floor(peak_gain - 30.0)))
     if radial_floor >= peak_gain:
@@ -863,7 +892,14 @@ def _draw_gain_lobes(ax, result: SimulationResult | None) -> None:
         phi,
         np.maximum(xy_gain_db, radial_floor),
         linewidth=1.1,
-        label="XY/horizon",
+        label=(
+            "XY/horizon (target 90 deg)"
+            if any(
+                math.isclose(theta_deg, 90.0, abs_tol=1e-9)
+                for theta_deg in target_thetas
+            )
+            else "XY/horizon"
+        ),
     )
     ax.plot(
         xz_angle,
@@ -871,13 +907,20 @@ def _draw_gain_lobes(ax, result: SimulationResult | None) -> None:
         linewidth=1.1,
         label="XZ/elevation",
     )
+    for theta_deg, ring_phi, ring_gain_db in target_curves:
+        ax.plot(
+            ring_phi,
+            np.maximum(ring_gain_db, radial_floor),
+            linewidth=1.1,
+            label=f"Target ring {theta_deg:g} deg",
+        )
     ax.set_rlim(radial_floor, radial_ceiling)
     frequency_hz = _result_frequency_hz(result)
     frequency_text = (
         f" at {frequency_hz / 1e6:g} MHz" if frequency_hz is not None else ""
     )
     ax.set_title(
-        f"XY and XZ realized gain{frequency_text} (dBi)",
+        f"Realized gain cuts and rings{frequency_text} (dBi)",
         fontsize=_font(9),
         fontweight="bold",
         pad=12,
@@ -895,14 +938,17 @@ def export_drawing(
     *,
     result: SimulationResult | None = None,
     title: str | None = None,
+    target_ring_thetas_deg: tuple[float, ...] = (),
     points_per_turn: int = 160,
     dpi: int = 300,
 ) -> Path:
     """Export an A3-landscape fabrication sheet as PDF, SVG, or PNG.
 
     Pass a solved ``SimulationResult`` to include its S11 sweep and sampled
-    XY/horizon and XZ/elevation realized-gain lobes. Geometry-only callers
-    remain supported and receive clearly marked placeholders for those plots.
+    XY/horizon and XZ/elevation realized-gain lobes. Pass requested theta
+    values through ``target_ring_thetas_deg`` to overlay verified azimuth rings.
+    Geometry-only callers remain supported and receive clearly marked
+    placeholders for those plots.
     """
     design.validate()
     destination = Path(output)
@@ -952,7 +998,11 @@ def export_drawing(
     _draw_dimensions(ax_xz, design, dims)
     _draw_yz_manufacturing_callouts(ax_yz, design, dims)
     _draw_s11(ax_s11, result)
-    _draw_gain_lobes(ax_lobe, result)
+    _draw_gain_lobes(
+        ax_lobe,
+        result,
+        target_ring_thetas_deg=target_ring_thetas_deg,
+    )
     _draw_table(ax_table, design, dims)
 
     figure.savefig(destination, dpi=dpi)

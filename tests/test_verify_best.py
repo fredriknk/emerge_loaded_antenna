@@ -311,9 +311,14 @@ class VerifyBestTests(unittest.TestCase):
                     868e6,
                     design_sheet=True,
                     jig_models=True,
+                    target_ring_thetas_deg=(90.0, 130.0),
                 )
 
         drawing.assert_called_once()
+        self.assertEqual(
+            drawing.call_args.kwargs["target_ring_thetas_deg"],
+            (90.0, 130.0),
+        )
         formers.assert_called_once_with(
             AntennaDesign(),
             output / "coil_formers.step",

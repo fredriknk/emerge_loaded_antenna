@@ -9,6 +9,7 @@ import numpy as np
 from emerge_loaded_antenna import AntennaDesign, CoilDesign
 from emerge_loaded_antenna.drawing import (
     A3_LANDSCAPE_SIZE_INCHES,
+    _azimuth_ring_gain,
     _draw_gain_lobes,
     _horizon_gain,
     _xz_gain,
@@ -122,6 +123,20 @@ def solved_result():
     )
 
 
+def multi_ring_result():
+    theta_axis = np.deg2rad((0.0, 90.0, 130.0, 180.0))
+    phi_axis = np.linspace(0.0, 2.0 * np.pi, 9)
+    phi, theta = np.meshgrid(phi_axis, theta_axis, indexing="ij")
+    gain_db = np.rad2deg(theta) / 100.0 + np.cos(phi)
+    norm_e = em.lib.EISO * 10.0 ** (gain_db / 20.0)
+    return SimpleNamespace(
+        frequencies=np.array((850e6, 868e6, 886e6)),
+        s11_db=np.array((-8.0, -15.0, -9.0)),
+        farfield_3d=SimpleNamespace(theta=theta, phi=phi, normE=norm_e),
+        farfield_metrics=SimpleNamespace(frequency_hz=868e6),
+    )
+
+
 def test_horizon_gain_extracts_and_closes_polar_cut():
     phi, gain_db = _horizon_gain(solved_result())
 
@@ -129,6 +144,14 @@ def test_horizon_gain_extracts_and_closes_polar_cut():
     assert math.isclose(phi[0], 0.0, abs_tol=1e-12)
     assert math.isclose(phi[-1], 2.0 * np.pi, abs_tol=1e-12)
     assert math.isclose(gain_db[0], 3.0, abs_tol=1e-12)
+    assert math.isclose(gain_db[-1], gain_db[0], abs_tol=1e-12)
+
+
+def test_azimuth_ring_gain_extracts_requested_verified_theta():
+    phi, gain_db = _azimuth_ring_gain(multi_ring_result(), 130.0)
+
+    assert phi.size == 9
+    assert math.isclose(gain_db[0], 2.3, abs_tol=1e-12)
     assert math.isclose(gain_db[-1], gain_db[0], abs_tol=1e-12)
 
 
@@ -152,6 +175,24 @@ def test_gain_lobes_use_clockwise_compass_orientation():
 
     assert math.isclose(axis.get_theta_offset(), np.pi / 2.0)
     assert axis.get_theta_direction() == -1.0
+    figure.clear()
+
+
+def test_gain_lobes_label_and_overlay_verified_target_rings():
+    from matplotlib.figure import Figure
+
+    figure = Figure()
+    axis = figure.add_subplot(111, projection="polar")
+    _draw_gain_lobes(
+        axis,
+        multi_ring_result(),
+        target_ring_thetas_deg=(90.0, 130.0),
+    )
+
+    labels = [line.get_label() for line in axis.lines]
+    assert "XY/horizon (target 90 deg)" in labels
+    assert "Target ring 130 deg" in labels
+    assert "XZ/elevation" in labels
     figure.clear()
 
 

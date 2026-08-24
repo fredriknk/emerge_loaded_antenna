@@ -343,7 +343,8 @@ mandrel diameter, pitch, and transition bend radius. The command-line exporter
 has no live solver result, so its RF panels are labeled as unavailable.
 
 Pass a solved `SimulationResult` through the Python API to include the complete
-S11 sweep and overlaid XY/horizon and XZ/elevation realized-gain lobes:
+S11 sweep and overlaid XY/horizon and XZ/elevation realized-gain lobes. Optional
+target theta rings can be drawn from the same solved far field:
 
 ```python
 from emerge_loaded_antenna.drawing import export_drawing
@@ -353,6 +354,7 @@ export_drawing(
     "antenna.pdf",
     result=result,
     title="868 MHz Prototype",
+    target_ring_thetas_deg=(90.0, 130.0),
 )
 ```
 
@@ -1122,7 +1124,8 @@ requested theta rings overlaid.
 
 With `--design-sheet`, it additionally writes `design_sheet.pdf` using the fine
 verification result, so the sheet includes dimensions, the verified S11 sweep,
-and the XY/horizon and XZ/elevation gain lobes.
+the XY/horizon and XZ/elevation gain lobes, and every configured optimizer
+target ring when the source campaign uses ring mode.
 
 With `--jig-models`, it writes `coil_formers.step`, containing the exact grooved
 winding formers, sizing mandrels, transition witness marks, and radial gauge.

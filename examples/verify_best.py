@@ -511,6 +511,7 @@ def export_fabrication_artifacts(
     *,
     design_sheet: bool,
     jig_models: bool,
+    target_ring_thetas_deg: tuple[float, ...] = (),
 ) -> dict:
     """Generate requested fabrication files from the fine verification result."""
     artifacts: dict[str, object] = {}
@@ -520,6 +521,7 @@ def export_fabrication_artifacts(
             output / "design_sheet.pdf",
             result=result,
             title=f"{frequency_hz / 1e6:g} MHz Verified Antenna",
+            target_ring_thetas_deg=target_ring_thetas_deg,
         )
         artifacts["design_sheet"] = sheet.name
         print(f"Design sheet       : {sheet.resolve()}")
@@ -638,7 +640,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--design-sheet",
         action="store_true",
-        help="export design_sheet.pdf with dimensions, S11, and horizon gain",
+        help=(
+            "export design_sheet.pdf with dimensions, S11, gain cuts, and "
+            "configured target rings"
+        ),
     )
     parser.add_argument(
         "--jig-models",
@@ -811,6 +816,12 @@ def main() -> None:
         frequency_hz,
         design_sheet=args.design_sheet,
         jig_models=args.jig_models,
+        target_ring_thetas_deg=(
+            tuple(pattern_target["theta_degrees"])
+            if pattern_target is not None
+            and pattern_target["mode"] == "ring"
+            else ()
+        ),
     )
     if artifacts:
         payload["artifacts"] = artifacts
