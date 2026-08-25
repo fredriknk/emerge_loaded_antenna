@@ -60,6 +60,36 @@ def test_step_export_contains_coil_tools_and_radial_gauge(tmp_path):
                 gmsh.finalize()
 
 
+def test_circular_step_export_omits_radial_gauge(tmp_path):
+    design = replace(
+        example_design(),
+        groundplane_type="circular",
+        groundplane_diameter=32e-3,
+    )
+    destination = export_coil_formers(design, tmp_path / "circular_formers.step")
+
+    owns_gmsh = not bool(gmsh.isInitialized())
+    previous_model = ""
+    if owns_gmsh:
+        gmsh.initialize()
+    else:
+        previous_model = gmsh.model.getCurrent()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("circular_former_import_check")
+        gmsh.model.occ.importShapes(str(destination.resolve()))
+        gmsh.model.occ.synchronize()
+        assert len(gmsh.model.getEntities(3)) == 2*design.coil_count
+    finally:
+        if gmsh.isInitialized():
+            if gmsh.model.getCurrent() == "circular_former_import_check":
+                gmsh.model.remove()
+            if previous_model:
+                gmsh.model.setCurrent(previous_model)
+            if owns_gmsh:
+                gmsh.finalize()
+
+
 def test_zero_coil_design_exports_radial_gauge_by_itself(tmp_path):
     design = replace(
         example_design(),
@@ -99,6 +129,19 @@ def test_zero_coil_design_requires_radial_gauge(tmp_path):
             tmp_path / "empty.step",
             include_radial_gauge=False,
         )
+
+
+def test_zero_coil_circular_design_has_no_forming_tools(tmp_path):
+    design = replace(
+        example_design(),
+        groundplane_type="circular",
+        groundplane_diameter=32e-3,
+        coils=(),
+        straight_lengths=(0.3,),
+    )
+
+    with pytest.raises(ValueError, match="no coils.*no forming tools"):
+        export_coil_formers(design, tmp_path / "empty.step")
 
 
 def test_zero_coil_design_exports_radial_gauge_as_stl(tmp_path):

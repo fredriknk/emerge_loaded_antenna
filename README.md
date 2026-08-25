@@ -245,6 +245,8 @@ with `--target-theta`; add `--target-phi` only for a single azimuth direction.
 | Field | Default | Meaning |
 |---|---:|---|
 | `wire_radius` | `1e-3` m | Conductor radius; diameter is twice this value. |
+| `groundplane_type` | `"radials"` | `"radials"` uses the legacy hub and wire radials; `"circular"` replaces them with a circular copper sheet. |
+| `groundplane_diameter` | `None` | Circular-sheet diameter in metres; required for `"circular"`, larger than the wire diameter, and omitted for `"radials"`. |
 | `radial_length` | `72e-3` m | Length of each ground-plane radial. |
 | `radial_angle_deg` | `45` | Radial angle below horizontal; strictly between 0 and 90. |
 | `radial_count` | `4` | Equally spaced radials; at least two. |
@@ -382,7 +384,8 @@ Each coil also receives an inside-diameter sizing mandrel with a shallow guide
 for correcting spring-back. Four witness notches identify the start and end of
 both transitions. A flat radial gauge carries the modeled radial angle, nominal
 length mark, and ground-hub relief. All parts are separate solids in the STEP
-file and are spaced for fabrication.
+file and are spaced for fabrication. Circular-groundplane designs omit the
+radial gauge automatically.
 
 The standalone command accepts either a design JSON or an optimizer result:
 
@@ -535,7 +538,7 @@ incumbents, and ranks the final feasible designs.
 
 Use unbuffered mode (`-u`) so long-running progress appears immediately.
 
-### Starting design and wire diameter
+### Starting design, wire diameter, and groundplane
 
 Without `--warm-start`, the campaign loads the tracked 868 MHz reference and
 scales all physical dimensions by wavelength to the requested frequency. A
@@ -584,9 +587,25 @@ start. The campaign converts it to `AntennaDesign.wire_radius`, keeps it fixed
 during optimization, and uses it to derive collision-safe lower bounds for
 straight lengths, radial length, coil pitch, and coil radius.
 
-There is no optimizer flag that fixes `AntennaDesign.radial_angle_deg`; that
-angle remains a design variable. It describes ground radials, not the desired
-radiation direction.
+Use `--groundplane` or its one-dash alias `-groundplane` to select a fixed
+circular groundplane. The diameter after the comma is in millimetres:
+
+```powershell
+.\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
+    --groundplane circular,32 `
+    --hours 8
+```
+
+This replaces the hub and wire radials with a zero-geometric-thickness, 32 mm
+diameter copper sheet at Z=0. The result persists the choice as
+`groundplane_type="circular"` and the diameter as
+`groundplane_diameter=0.032` metres. Its diameter remains fixed during
+optimization, and radial length and angle are removed from the search space.
+Pass `--groundplane radials` to restore the legacy hub-and-radial ground system,
+including its radial variables.
+
+For radial groundplanes, `AntennaDesign.radial_angle_deg` remains a design
+variable. It describes the ground radials, not the desired radiation direction.
 
 ### Topology selection
 
@@ -623,13 +642,16 @@ topology permits it.
 
 ### Coil parameterization and fine tuning
 
-By default, the optimizer searches every straight length, every coil pitch,
-every coil radius, radial length, and ground-radial angle independently. A
-loaded design with `N` coils therefore has `3N + 3` continuous variables; an
-unloaded radiator has three.
+With the default radial groundplane, the optimizer searches every straight
+length, every coil pitch, every coil radius, radial length, and ground-radial
+angle independently. A loaded design with `N` coils therefore has `3N + 3`
+continuous variables; an unloaded radiator has three. A fixed circular
+groundplane removes the two radial variables, reducing those counts to
+`3N + 1` and one.
 
 Use `--lock-coils` when every coil should share one pitch and one radius. This
-reduces an N-coil design to `N + 5` variables:
+reduces an N-coil design to `N + 5` variables with radials, or `N + 3` with a
+fixed circular groundplane:
 
 ```powershell
 .\.venv\Scripts\python.exe -u .\examples\optimize_gain.py `
@@ -895,8 +917,11 @@ the campaign runs the open-region convergence study automatically.
 
 Important distinctions:
 
-- The preflight design is a wavelength-scaled numerical reference independent
-  of the user's warm start and topology.
+- The preflight radiator is a wavelength-scaled numerical reference independent
+  of the user's warm-start coil topology, while its groundplane type and fixed
+  circular diameter match the campaign.
+- Default radial and circular certificates use distinct filenames, so campaigns
+  at one frequency do not overwrite each other's seven-solve preflight.
 - A failed preflight warns and continues unless `--require-convergence` is set.
 - `--no-auto-convergence` disables automatic certificate generation but still
   permits checking an explicitly supplied report.
@@ -946,6 +971,7 @@ Campaign and topology:
 | `--frequency-mhz` | `868` | Target frequency. |
 | `--match-bandwidth-mhz` | scaled 10 MHz | Three-point match span. |
 | `--wire-diameter-mm`, `--wire-diameter` | inherited | Fixed conductor diameter. |
+| `--groundplane`, `-groundplane` | inherited | Fixed ground system: `circular,32` selects a 32 mm copper sheet; `radials` restores the legacy hub and wire radials. |
 | `--maxiter` / `--hours` | `20` iterations | Mutually exclusive generation or time budget. |
 | `--seconds-per-eval` | `8` | Estimate used to translate hours into evaluations. |
 | `--popsize` | `8` | Differential-evolution population multiplier. |

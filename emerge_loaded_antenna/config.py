@@ -23,6 +23,7 @@ SOLVER_CHOICES = (
 
 OPEN_REGION_MODES = ("pml", "abc")
 ABC_TYPES = ("A", "B", "C", "D", "E")
+GROUNDPLANE_TYPES = ("radials", "circular")
 
 TRANSITION_OFFSET_RATIO = 19.0/24.0
 MINIMUM_TRANSITION_WIRE_RADIUS_RATIO = 5.0/4.0
@@ -94,6 +95,8 @@ class AntennaDesign:
     )
     port_height: float = 2e-3
     port_impedance: float = 50.0
+    groundplane_type: str = "radials"
+    groundplane_diameter: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "straight_lengths", tuple(self.straight_lengths))
@@ -103,17 +106,48 @@ class AntennaDesign:
     def coil_count(self) -> int:
         return len(self.coils)
 
+    @property
+    def has_circular_groundplane(self) -> bool:
+        """Whether the radial ground system is replaced by a circular sheet."""
+        return self.groundplane_type == "circular"
+
     def validate(self) -> None:
         if self.wire_radius <= 0:
             raise ValueError("wire_radius must be positive")
-        if self.radial_length <= 0:
-            raise ValueError("radial_length must be positive")
-        if not 0 < self.radial_angle_deg < 90:
-            raise ValueError("radial_angle_deg must be between 0 and 90")
-        if isinstance(self.radial_count, bool) or int(self.radial_count) != self.radial_count:
-            raise ValueError("radial_count must be an integer")
-        if self.radial_count < 2:
-            raise ValueError("radial_count must be at least two")
+        if self.groundplane_type not in GROUNDPLANE_TYPES:
+            choices = ", ".join(GROUNDPLANE_TYPES)
+            raise ValueError(f"groundplane_type must be one of: {choices}")
+        if self.has_circular_groundplane:
+            if (
+                self.groundplane_diameter is None
+                or not math.isfinite(self.groundplane_diameter)
+                or self.groundplane_diameter <= 0
+            ):
+                raise ValueError(
+                    "groundplane_diameter must be finite and positive for a "
+                    "circular groundplane"
+                )
+            if self.groundplane_diameter <= 2*self.wire_radius:
+                raise ValueError(
+                    "groundplane_diameter must exceed the wire diameter for a "
+                    "circular groundplane"
+                )
+        else:
+            if self.groundplane_diameter is not None:
+                raise ValueError(
+                    "groundplane_diameter must be omitted for a radial groundplane"
+                )
+            if self.radial_length <= 0:
+                raise ValueError("radial_length must be positive")
+            if not 0 < self.radial_angle_deg < 90:
+                raise ValueError("radial_angle_deg must be between 0 and 90")
+            if (
+                isinstance(self.radial_count, bool)
+                or int(self.radial_count) != self.radial_count
+            ):
+                raise ValueError("radial_count must be an integer")
+            if self.radial_count < 2:
+                raise ValueError("radial_count must be at least two")
         if len(self.straight_lengths) != self.coil_count + 1:
             raise ValueError(
                 "straight_lengths must contain exactly one more item than coils"

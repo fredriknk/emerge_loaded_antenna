@@ -527,7 +527,17 @@ def export_fabrication_artifacts(
         print(f"Design sheet       : {sheet.resolve()}")
     if jig_models:
         if design.coil_count:
-            models = export_coil_formers(design, output / "coil_formers.step")
+            if design.has_circular_groundplane:
+                models = export_coil_formers(
+                    design,
+                    output / "coil_formers.step",
+                    include_radial_gauge=False,
+                )
+            else:
+                models = export_coil_formers(
+                    design,
+                    output / "coil_formers.step",
+                )
             artifacts["jig_models"] = [models.name]
             print(f"Forming tools      : {models.resolve()}")
         else:
@@ -648,7 +658,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jig-models",
         action="store_true",
-        help="export coil formers, sizing mandrels, and a radial gauge as STEP",
+        help=(
+            "export coil formers and sizing mandrels as STEP, plus a radial "
+            "gauge when the design uses radials"
+        ),
     )
     args = parser.parse_args()
     if args.latest and args.result is not None:

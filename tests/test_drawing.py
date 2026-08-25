@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import emerge as em
@@ -11,6 +12,7 @@ from emerge_loaded_antenna.drawing import (
     A3_LANDSCAPE_SIZE_INCHES,
     _azimuth_ring_gain,
     _draw_gain_lobes,
+    _draw_table,
     _horizon_gain,
     _xz_gain,
     derive_drawing_dimensions,
@@ -95,6 +97,47 @@ def test_radial_centerlines_have_expected_modeled_length():
     dims = derive_drawing_dimensions(design)
     for radial in radial_centerlines(design):
         assert math.isclose(np.linalg.norm(radial[1] - radial[0]), dims.radial_model_length, rel_tol=1e-12)
+
+
+def test_circular_groundplane_dimensions_replace_hub_and_radials():
+    design = replace(
+        example_design(),
+        groundplane_type="circular",
+        groundplane_diameter=32e-3,
+    )
+
+    dims = derive_drawing_dimensions(design)
+
+    assert dims.groundplane_type == "circular"
+    assert math.isclose(dims.groundplane_diameter, 32e-3)
+    assert math.isclose(dims.groundplane_radius, 16e-3)
+    assert dims.hub_radius is None
+    assert dims.radial_model_length is None
+    assert radial_centerlines(design) == ()
+
+    from matplotlib.figure import Figure
+
+    figure = Figure()
+    axis = figure.add_subplot(111)
+    _draw_table(axis, design, dims)
+    table_text = "\n".join(item.get_text() for item in axis.texts)
+    assert "Circular ground plane: dia 32.000 mm" in table_text
+    assert "Ground hub:" not in table_text
+    assert "Radials:" not in table_text
+    figure.clear()
+
+
+def test_circular_groundplane_svg_export(tmp_path):
+    design = replace(
+        example_design(),
+        groundplane_type="circular",
+        groundplane_diameter=32e-3,
+    )
+
+    destination = export_drawing(design, tmp_path / "circular.svg")
+
+    assert destination.exists()
+    assert destination.stat().st_size > 10_000
 
 
 def test_svg_export(tmp_path):

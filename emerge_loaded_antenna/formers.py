@@ -444,9 +444,12 @@ def export_coil_formers(
     Multiple tools are placed side-by-side with ``spacing`` between blanks.
     By default, each coil also gets an inside-diameter sizing mandrel with only
     a shallow guide groove for correcting spring-back by hand.
-    The radial angle gauge is independent of the coils, so a design without
-    coils exports the gauge by itself when ``include_radial_gauge`` is true.
+    The radial angle gauge is independent of the coils, so a radial design
+    without coils exports the gauge by itself when ``include_radial_gauge`` is
+    true. Circular-groundplane designs never produce a radial gauge.
     """
+    if design.has_circular_groundplane:
+        include_radial_gauge = False
     destination = Path(output)
     if destination.suffix.lower() not in {".step", ".stp", ".stl"}:
         raise ValueError("coil-former output must end in .step, .stp, or .stl")
@@ -458,6 +461,11 @@ def export_coil_formers(
         spacing=spacing,
     )
     if not dimensions and not include_radial_gauge:
+        if design.has_circular_groundplane:
+            raise ValueError(
+                "circular design has no coils, so there are no forming tools "
+                "to export"
+            )
         raise ValueError("at least one coil or the radial gauge is required")
     if stl_mesh_size is not None and stl_mesh_size <= 0:
         raise ValueError("stl_mesh_size must be positive")

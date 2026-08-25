@@ -330,6 +330,33 @@ class VerifyBestTests(unittest.TestCase):
             Path("coil_formers.step"),
         )
 
+    def test_circular_fabrication_omits_radial_gauge(self):
+        design = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+        )
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            former_path = output / "coil_formers.step"
+            with patch(
+                "examples.verify_best.export_coil_formers",
+                return_value=former_path,
+            ) as formers:
+                export_fabrication_artifacts(
+                    design,
+                    object(),
+                    output,
+                    868e6,
+                    design_sheet=False,
+                    jig_models=True,
+                )
+
+        formers.assert_called_once_with(
+            design,
+            output / "coil_formers.step",
+            include_radial_gauge=False,
+        )
+
     def test_model_and_mesh_viewer_flags_are_parsed(self):
         with patch(
             "sys.argv",

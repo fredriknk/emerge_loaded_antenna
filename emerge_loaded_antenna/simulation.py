@@ -508,14 +508,21 @@ def _print_design(design: AntennaDesign, path: AntennaPath) -> None:
     print(f"Wire diameter      : {2*design.wire_radius*1e3:.2f} mm")
     print(f"Antenna height     : {antenna_height*1e3:.2f} mm")
     print(f"Overall height     : {zpts[-1]*1e3:.2f} mm")
-    print(
-        f"Radials            : {design.radial_count} x "
-        f"{design.radial_length*1e3:.1f} mm"
-    )
-    print(
-        f"Radial angle       : {design.radial_angle_deg:.1f} deg "
-        "below horizontal"
-    )
+    if design.has_circular_groundplane:
+        assert design.groundplane_diameter is not None
+        print(
+            "Groundplane        : circular, "
+            f"{design.groundplane_diameter*1e3:.1f} mm diameter"
+        )
+    else:
+        print(
+            f"Radials            : {design.radial_count} x "
+            f"{design.radial_length*1e3:.1f} mm"
+        )
+        print(
+            f"Radial angle       : {design.radial_angle_deg:.1f} deg "
+            "below horizontal"
+        )
     print("----------------------------------------------------")
 
 
@@ -681,75 +688,88 @@ def build_model(
         ).foreground()
     )
     feed.max_meshsize = mesh.feed_size_factor*design.wire_radius
-    mm = 1e-3
-    hub_radius = 1.95*mm/2+design.wire_radius*2#4*design.wire_radius
-    hub_height = 6*mm#3*design.wire_radius
-    ground_hub = em.geo.Cylinder(
-        hub_radius,
-        hub_height,
-        cs=em.GCS.displace(0.0, 0.0, -hub_height),
-        Nsections=mesh.wire_sections,#max(24, mesh.wire_sections),
-        name="GroundHub",
-    )
-    ground_hub.max_meshsize = mesh.feed_size_factor*design.wire_radius
+    if design.has_circular_groundplane:
+        assert design.groundplane_diameter is not None
+        ground_horizontal = design.groundplane_diameter/2
+        ground_lowest_z = 0.0
+        ground_system = (
+            em.geo.Disc(
+                (0.0, 0.0, 0.0),
+                ground_horizontal,
+                name="CircularGroundPlane",
+            )
+            .set_material(em.lib.MET_COPPER)
+            .foreground()
+        )
+    else:
+        mm = 1e-3
+        hub_radius = 1.95*mm/2+design.wire_radius*2#4*design.wire_radius
+        hub_height = 6*mm#3*design.wire_radius
+        ground_hub = em.geo.Cylinder(
+            hub_radius,
+            hub_height,
+            cs=em.GCS.displace(0.0, 0.0, -hub_height),
+            Nsections=mesh.wire_sections,#max(24, mesh.wire_sections),
+            name="GroundHub",
+        )
+        ground_hub.max_meshsize = mesh.feed_size_factor*design.wire_radius
 
-    radial_start =hub_radius-design.wire_radius
-    if design.radial_length <= radial_start:
-        raise ValueError("radial_length must exceed three wire radii")
-    radial_tilt = 90.0 + design.radial_angle_deg
-    radials = []
-    for index in range(design.radial_count):
-        radial = em.geo.Cylinder(
-            design.wire_radius,
-            design.radial_length - radial_start,
-            cs=em.GCS.displace(0.0, 0.0, radial_start),
-            Nsections=mesh.wire_sections,
-            name=f"Radial{index + 1}",
-        )
-        radial = em.geo.rotate(
-            radial,
-            (0.0, 0.0, 0.0),
-            (0.0, 1.0, 0.0),
-            radial_tilt,
-        )
-        radial = em.geo.rotate(
-            radial,
-            (0.0, 0.0, 0.0),
-            (0.0, 0.0, 1.0),
-            index*360.0/design.radial_count,
-        )
-        
-        em.geo.translate(
-            radial,
-            dz=-hub_height+design.wire_radius*2,
-        )
+        radial_start =hub_radius-design.wire_radius
+        if design.radial_length <= radial_start:
+            raise ValueError("radial_length must exceed three wire radii")
+        radial_tilt = 90.0 + design.radial_angle_deg
+        radials = []
+        for index in range(design.radial_count):
+            radial = em.geo.Cylinder(
+                design.wire_radius,
+                design.radial_length - radial_start,
+                cs=em.GCS.displace(0.0, 0.0, radial_start),
+                Nsections=mesh.wire_sections,
+                name=f"Radial{index + 1}",
+            )
+            radial = em.geo.rotate(
+                radial,
+                (0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                radial_tilt,
+            )
+            radial = em.geo.rotate(
+                radial,
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0),
+                index*360.0/design.radial_count,
+            )
 
-        radial = radial.set_material(em.lib.MET_COPPER).foreground()
-        radial.max_meshsize = mesh.radial_size_factor*design.wire_radius
-        radials.append(radial)
-    
-    
-    ground_system = (
-        em.geo.unite(ground_hub, *radials)
-        .set_material(em.lib.MET_COPPER)
-        .foreground()
-    )
+            em.geo.translate(
+                radial,
+                dz=-hub_height+design.wire_radius*2,
+            )
+
+            radial = radial.set_material(em.lib.MET_COPPER).foreground()
+            radial.max_meshsize = mesh.radial_size_factor*design.wire_radius
+            radials.append(radial)
+
+        ground_system = (
+            em.geo.unite(ground_hub, *radials)
+            .set_material(em.lib.MET_COPPER)
+            .foreground()
+        )
+        ground_horizontal = design.radial_length*np.cos(
+            np.deg2rad(design.radial_angle_deg)
+        )
+        ground_lowest_z = -design.radial_length*np.sin(
+            np.deg2rad(design.radial_angle_deg)
+        )
 
     ground_system.max_meshsize = mesh.radial_size_factor*design.wire_radius
 
     wavelength = C0/options.sweep.center
     air_margin = mesh.air_margin_wavelengths*wavelength
-    radial_horizontal = design.radial_length*np.cos(
-        np.deg2rad(design.radial_angle_deg)
-    )
-    xmin = min(float(np.min(xpts)), -radial_horizontal) - air_margin
-    xmax = max(float(np.max(xpts)), radial_horizontal) + air_margin
-    ymin = min(float(np.min(ypts)), -radial_horizontal) - air_margin
-    ymax = max(float(np.max(ypts)), radial_horizontal) + air_margin
-    radial_lowest_z = -design.radial_length*np.sin(
-        np.deg2rad(design.radial_angle_deg)
-    )
-    zmin = radial_lowest_z - air_margin
+    xmin = min(float(np.min(xpts)), -ground_horizontal) - air_margin
+    xmax = max(float(np.max(xpts)), ground_horizontal) + air_margin
+    ymin = min(float(np.min(ypts)), -ground_horizontal) - air_margin
+    ymax = max(float(np.max(ypts)), ground_horizontal) + air_margin
+    zmin = ground_lowest_z - air_margin
     zmax = float(np.max(zpts)) + air_margin
     open_region_bounds = _OpenRegionBounds(
         xmin=xmin,

@@ -16,8 +16,18 @@ CONVERGENCE_SCHEMA_VERSION = 2
 
 def design_fingerprint(design: AntennaDesign) -> str:
     """Return a stable fingerprint for one physical antenna design."""
+    values = asdict(design)
+    # Preserve fingerprints from before selectable ground planes were added.
+    # The new default fields do not change the legacy radial geometry, and
+    # existing convergence certificates should remain reusable for it.
+    if (
+        values.get("groundplane_type") == "radials"
+        and values.get("groundplane_diameter") is None
+    ):
+        values.pop("groundplane_type")
+        values.pop("groundplane_diameter")
     encoded = json.dumps(
-        asdict(design),
+        values,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")

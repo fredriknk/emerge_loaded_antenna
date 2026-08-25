@@ -23,6 +23,11 @@ def scale_design(design: AntennaDesign, factor: float) -> AntennaDesign:
     scaled = replace(
         design,
         wire_radius=design.wire_radius*factor,
+        groundplane_diameter=(
+            None
+            if design.groundplane_diameter is None
+            else design.groundplane_diameter*factor
+        ),
         radial_length=design.radial_length*factor,
         straight_lengths=tuple(value*factor for value in design.straight_lengths),
         coils=tuple(

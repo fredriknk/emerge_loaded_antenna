@@ -5,9 +5,11 @@ This module intentionally reproduces the centerline equations used by
 It can therefore turn an :class:`AntennaDesign` into a lightweight drawing
 showing the X-Z, Y-Z, and X-Y orthographic views plus derived dimensions.
 
-The ground-hub dimensions below match the current model in ``simulation.py``.
-They are kept explicit here because they are part of the simulated physical
-geometry even though they are not yet fields on ``AntennaDesign``.
+The legacy ground-hub dimensions below match the radial model in
+``simulation.py``.  They are kept explicit here because they are part of that
+simulated physical geometry even though they are not fields on
+``AntennaDesign``.  Circular ground planes use the diameter stored directly on
+the design.
 """
 
 from __future__ import annotations
@@ -68,13 +70,16 @@ class AntennaDrawingDimensions:
     radiator_height: float
     straight_ranges: tuple[tuple[float, float], ...]
     coils: tuple[CoilDrawingDimensions, ...]
-    hub_radius: float
-    hub_height: float
-    radial_virtual_apex_z: float
-    radial_model_start_radius: float
-    radial_model_length: float
-    radial_horizontal_radius: float
-    radial_tip_z: float
+    groundplane_type: str
+    groundplane_diameter: float | None
+    groundplane_radius: float | None
+    hub_radius: float | None
+    hub_height: float | None
+    radial_virtual_apex_z: float | None
+    radial_model_start_radius: float | None
+    radial_model_length: float | None
+    radial_horizontal_radius: float | None
+    radial_tip_z: float | None
 
 
 def _coil_parameters(coil: CoilDesign) -> tuple[float, float, float]:
@@ -183,16 +188,34 @@ def derive_drawing_dimensions(design: AntennaDesign) -> AntennaDrawingDimensions
         )
         z = coil_end
 
-    hub_radius = MODEL_HUB_CORE_RADIUS + 2.0 * design.wire_radius
-    radial_model_start_radius = hub_radius - design.wire_radius
-    radial_model_length = design.radial_length - radial_model_start_radius
-    if radial_model_length <= 0:
-        raise ValueError("radial_length is too short for the modeled ground hub")
+    if design.has_circular_groundplane:
+        groundplane_diameter = design.groundplane_diameter
+        assert groundplane_diameter is not None
+        groundplane_radius = groundplane_diameter / 2.0
+        hub_radius = None
+        hub_height = None
+        radial_model_start_radius = None
+        radial_model_length = None
+        radial_virtual_apex_z = None
+        radial_horizontal_radius = None
+        radial_tip_z = None
+    else:
+        groundplane_diameter = None
+        groundplane_radius = None
+        hub_radius = MODEL_HUB_CORE_RADIUS + 2.0 * design.wire_radius
+        hub_height = MODEL_HUB_HEIGHT
+        radial_model_start_radius = hub_radius - design.wire_radius
+        radial_model_length = design.radial_length - radial_model_start_radius
+        if radial_model_length <= 0:
+            raise ValueError("radial_length is too short for the modeled ground hub")
 
-    radial_angle = math.radians(design.radial_angle_deg)
-    radial_virtual_apex_z = -MODEL_HUB_HEIGHT + 2.0 * design.wire_radius
-    radial_horizontal_radius = design.radial_length * math.cos(radial_angle)
-    radial_tip_z = radial_virtual_apex_z - design.radial_length * math.sin(radial_angle)
+        radial_angle = math.radians(design.radial_angle_deg)
+        radial_virtual_apex_z = -MODEL_HUB_HEIGHT + 2.0 * design.wire_radius
+        radial_horizontal_radius = design.radial_length * math.cos(radial_angle)
+        radial_tip_z = (
+            radial_virtual_apex_z
+            - design.radial_length * math.sin(radial_angle)
+        )
 
     return AntennaDrawingDimensions(
         wire_diameter=2.0 * design.wire_radius,
@@ -201,8 +224,11 @@ def derive_drawing_dimensions(design: AntennaDesign) -> AntennaDrawingDimensions
         radiator_height=z - design.port_height,
         straight_ranges=tuple(straight_ranges),
         coils=tuple(coil_dimensions),
+        groundplane_type=design.groundplane_type,
+        groundplane_diameter=groundplane_diameter,
+        groundplane_radius=groundplane_radius,
         hub_radius=hub_radius,
-        hub_height=MODEL_HUB_HEIGHT,
+        hub_height=hub_height,
         radial_virtual_apex_z=radial_virtual_apex_z,
         radial_model_start_radius=radial_model_start_radius,
         radial_model_length=radial_model_length,
@@ -363,8 +389,14 @@ def sample_centerline(
 
 
 def radial_centerlines(design: AntennaDesign) -> tuple[np.ndarray, ...]:
-    """Return the modeled solid radial centerlines as ``(2, 3)`` arrays."""
+    """Return modeled radial centerlines, or none for a circular ground plane."""
+    design.validate()
+    if design.has_circular_groundplane:
+        return ()
+
     dims = derive_drawing_dimensions(design)
+    assert dims.radial_model_start_radius is not None
+    assert dims.radial_virtual_apex_z is not None
     angle = math.radians(design.radial_angle_deg)
     result: list[np.ndarray] = []
 
@@ -453,11 +485,25 @@ def _draw_side_view(ax, design: AntennaDesign, path_mm: np.ndarray, plane: str) 
 
     ax.plot(horizontal, path_mm[:, 2], linewidth=1.25)
 
-    # Simulation feed region and current hard-coded ground hub.
-    hub_radius = _mm(dims.hub_radius)
-    hub_height = _mm(dims.hub_height)
-    ax.plot((-hub_radius, hub_radius, hub_radius, -hub_radius, -hub_radius),
-            (-hub_height, -hub_height, 0.0, 0.0, -hub_height), linewidth=1.0)
+    if design.has_circular_groundplane:
+        assert dims.groundplane_radius is not None
+        groundplane_radius = _mm(dims.groundplane_radius)
+        # A zero-thickness sheet projects to its full diameter in side view.
+        ax.plot(
+            (-groundplane_radius, groundplane_radius),
+            (0.0, 0.0),
+            linewidth=1.4,
+        )
+    else:
+        assert dims.hub_radius is not None
+        assert dims.hub_height is not None
+        hub_radius = _mm(dims.hub_radius)
+        hub_height = _mm(dims.hub_height)
+        ax.plot(
+            (-hub_radius, hub_radius, hub_radius, -hub_radius, -hub_radius),
+            (-hub_height, -hub_height, 0.0, 0.0, -hub_height),
+            linewidth=1.0,
+        )
     wire_radius = _mm(design.wire_radius)
     ax.plot((-wire_radius, -wire_radius, wire_radius, wire_radius),
             (0.0, _mm(design.port_height), _mm(design.port_height), 0.0),
@@ -510,28 +556,56 @@ def _draw_top_view(ax, design: AntennaDesign, path_mm: np.ndarray) -> None:
             arrowprops={"arrowstyle": "-", "linewidth": 0.6, "color": "0.35"},
         )
 
-    hub_radius = _mm(dims.hub_radius)
-    ax.plot(hub_radius * np.cos(theta), hub_radius * np.sin(theta), linewidth=1.0)
+    if design.has_circular_groundplane:
+        assert dims.groundplane_radius is not None
+        groundplane_radius = _mm(dims.groundplane_radius)
+        groundplane_x = groundplane_radius * np.cos(theta)
+        groundplane_y = groundplane_radius * np.sin(theta)
+        ax.fill(groundplane_x, groundplane_y, color="0.75", alpha=0.18)
+        ax.plot(groundplane_x, groundplane_y, linewidth=1.2)
+    else:
+        assert dims.hub_radius is not None
+        assert dims.radial_model_start_radius is not None
+        assert dims.radial_horizontal_radius is not None
+        hub_radius = _mm(dims.hub_radius)
+        ax.plot(
+            hub_radius * np.cos(theta),
+            hub_radius * np.sin(theta),
+            linewidth=1.0,
+        )
 
-    angle = math.radians(design.radial_angle_deg)
-    start_horizontal = dims.radial_model_start_radius * math.cos(angle)
-    end_horizontal = dims.radial_horizontal_radius
-    for index in range(design.radial_count):
-        phi = math.radians(index * 360.0 / design.radial_count)
-        c, s = math.cos(phi), math.sin(phi)
-        # Dashed virtual length inside the hub, then the modeled solid radial.
-        ax.plot((0.0, _mm(start_horizontal) * c), (0.0, _mm(start_horizontal) * s),
-                linestyle="--", linewidth=0.55)
-        ax.plot((_mm(start_horizontal) * c, _mm(end_horizontal) * c),
-                (_mm(start_horizontal) * s, _mm(end_horizontal) * s), linewidth=1.0)
+        angle = math.radians(design.radial_angle_deg)
+        start_horizontal = dims.radial_model_start_radius * math.cos(angle)
+        end_horizontal = dims.radial_horizontal_radius
+        for index in range(design.radial_count):
+            phi = math.radians(index * 360.0 / design.radial_count)
+            c, s = math.cos(phi), math.sin(phi)
+            # Dashed virtual length inside the hub, then the modeled solid radial.
+            ax.plot(
+                (0.0, _mm(start_horizontal) * c),
+                (0.0, _mm(start_horizontal) * s),
+                linestyle="--",
+                linewidth=0.55,
+            )
+            ax.plot(
+                (_mm(start_horizontal) * c, _mm(end_horizontal) * c),
+                (_mm(start_horizontal) * s, _mm(end_horizontal) * s),
+                linewidth=1.0,
+            )
 
     _setup_orthographic_axis(ax, "X (mm)", "Y (mm)", "X-Y top view")
 
 
 def _draw_dimensions(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> None:
-    radial_extent = _mm(dims.radial_horizontal_radius)
-    straight_x = radial_extent + 9.0
-    overall_x = radial_extent + 43.0
+    ground_extent = (
+        dims.groundplane_radius
+        if design.has_circular_groundplane
+        else dims.radial_horizontal_radius
+    )
+    assert ground_extent is not None
+    ground_extent_mm = _mm(ground_extent)
+    straight_x = ground_extent_mm + 9.0
+    overall_x = ground_extent_mm + 43.0
 
     # Dimension the straight sections in one readable chain. Coil construction
     # details are grouped in the Y-Z view where they do not compete with this chain.
@@ -567,7 +641,7 @@ def _draw_dimensions(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) 
 def _draw_yz_manufacturing_callouts(
     ax, design: AntennaDesign, dims: AntennaDrawingDimensions
 ) -> None:
-    """Put small, direct coil and radial dimensions in Y-Z whitespace."""
+    """Put small, direct coil and ground dimensions in Y-Z whitespace."""
     leader = {"arrowstyle": "-", "linewidth": 0.6, "color": "0.35"}
 
     callout_y = np.linspace(0.86, 0.50, max(len(dims.coils), 2))
@@ -595,13 +669,30 @@ def _draw_yz_manufacturing_callouts(
             arrowprops={"arrowstyle": "->", "linewidth": 0.65, "color": "0.25"},
         )
 
-    # Use the negative-Y radial so the leader and its text remain on the same side.
-    ax.annotate(
-        (
-            f"RADIALS {design.radial_count} x L {_mm(design.radial_length):.2f} mm nominal\n"
+    if design.has_circular_groundplane:
+        assert dims.groundplane_radius is not None
+        assert dims.groundplane_diameter is not None
+        callout = (
+            "CIRCULAR GROUND PLANE\n"
+            f"DIA {_mm(dims.groundplane_diameter):.2f} mm"
+        )
+        anchor = (-_mm(dims.groundplane_radius), 0.0)
+    else:
+        assert dims.radial_horizontal_radius is not None
+        assert dims.radial_tip_z is not None
+        callout = (
+            f"RADIALS {design.radial_count} x L "
+            f"{_mm(design.radial_length):.2f} mm nominal\n"
             f"ANGLE {design.radial_angle_deg:.2f} deg below horizontal"
-        ),
-        xy=(-_mm(dims.radial_horizontal_radius), _mm(dims.radial_tip_z)),
+        )
+        # Use the negative-Y radial so the leader remains on the same side.
+        anchor = (
+            -_mm(dims.radial_horizontal_radius),
+            _mm(dims.radial_tip_z),
+        )
+    ax.annotate(
+        callout,
+        xy=anchor,
         xycoords="data",
         xytext=(0.03, 0.14),
         textcoords="axes fraction",
@@ -615,17 +706,36 @@ def _draw_yz_manufacturing_callouts(
 def _draw_table(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> None:
     ax.axis("off")
 
-    global_text = (
-        f"Wire dia: {_mm(dims.wire_diameter):.3f} mm\n"
-        f"Radiator height: {_mm(dims.radiator_height):.3f} mm\n"
-        f"Radiator start Z: {_mm(dims.radiator_start_z):.3f} mm\n"
-        f"Tip Z / overall: {_mm(dims.radiator_tip_z):.3f} mm\n"
-        f"Ground hub: dia {_mm(2*dims.hub_radius):.3f} x {_mm(dims.hub_height):.3f} mm\n"
-        f"Radials: {design.radial_count} x {_mm(design.radial_length):.3f} mm nominal, "
-        f"{design.radial_angle_deg:.3f} deg below horizontal\n"
-        f"Modeled radial cylinder: {_mm(dims.radial_model_length):.3f} mm; "
-        f"virtual apex Z {_mm(dims.radial_virtual_apex_z):.3f} mm"
-    )
+    global_lines = [
+        f"Wire dia: {_mm(dims.wire_diameter):.3f} mm",
+        f"Radiator height: {_mm(dims.radiator_height):.3f} mm",
+        f"Radiator start Z: {_mm(dims.radiator_start_z):.3f} mm",
+        f"Tip Z / overall: {_mm(dims.radiator_tip_z):.3f} mm",
+    ]
+    if design.has_circular_groundplane:
+        assert dims.groundplane_diameter is not None
+        global_lines.append(
+            "Circular ground plane: dia "
+            f"{_mm(dims.groundplane_diameter):.3f} mm"
+        )
+    else:
+        assert dims.hub_radius is not None
+        assert dims.hub_height is not None
+        assert dims.radial_model_length is not None
+        assert dims.radial_virtual_apex_z is not None
+        global_lines.extend(
+            (
+                f"Ground hub: dia {_mm(2*dims.hub_radius):.3f} x "
+                f"{_mm(dims.hub_height):.3f} mm",
+                f"Radials: {design.radial_count} x "
+                f"{_mm(design.radial_length):.3f} mm nominal, "
+                f"{design.radial_angle_deg:.3f} deg below horizontal",
+                f"Modeled radial cylinder: "
+                f"{_mm(dims.radial_model_length):.3f} mm; virtual apex Z "
+                f"{_mm(dims.radial_virtual_apex_z):.3f} mm",
+            )
+        )
+    global_text = "\n".join(global_lines)
     ax.text(0.0, 0.98, "GLOBAL DIMENSIONS", fontsize=_font(9), fontweight="bold", va="top", transform=ax.transAxes)
     ax.text(0.0, 0.86, global_text, fontsize=_font(7.2), va="top", family="monospace", transform=ax.transAxes)
 
@@ -646,14 +756,24 @@ def _draw_table(ax, design: AntennaDesign, dims: AntennaDrawingDimensions) -> No
     ax.text(0.45, 0.98, "COIL DETAILS", fontsize=_font(9), fontweight="bold", va="top", transform=ax.transAxes)
     ax.text(0.45, 0.86, "\n".join(coil_lines), fontsize=_font(6.9), va="top", family="monospace", transform=ax.transAxes)
 
+    if design.has_circular_groundplane:
+        ground_note = (
+            "The circular ground plane is modeled as a zero-thickness conductive "
+            "sheet; its specified fabrication dimension is the planform diameter. "
+        )
+    else:
+        ground_note = (
+            "Radial length is the nominal virtual-apex-to-tip dimension; the current "
+            "CAD starts the radial solid inside the ground hub for overlap. "
+        )
     notes = (
         "NOTES: MANDREL ID and ID dimensions are the clear inside coil diameter; "
         "coil centerline radius is retained as CTR R. TRANS-R / Bend R is the local "
         "radius of curvature where the Hermite transition joins the straight wire; "
         "the transition's curvature varies away from that point. The smooth inlet/outlet "
-        "transitions reproduce the simulation's cubic-Hermite geometry. Radial length "
-        "is the nominal virtual-apex-to-tip dimension; the current CAD starts the radial "
-        "solid inside the ground hub for overlap. The dashed feed region is the modeled "
+        "transitions reproduce the simulation's cubic-Hermite geometry. "
+        + ground_note
+        + "The dashed feed region is the modeled "
         "lumped-port geometry and should be translated into the intended connector/insulator "
         "construction before fabrication."
     )

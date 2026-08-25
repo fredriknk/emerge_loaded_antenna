@@ -38,6 +38,7 @@ from examples.optimize_gain import (
     build_case_schedules,
     build_finetune_population,
     coordinate_polish,
+    default_convergence_report_path,
     default_maximum_height,
     design_for_coil_count,
     ensure_convergence_certificate,
@@ -47,6 +48,7 @@ from examples.optimize_gain import (
     normalized_pattern_search,
     parse_args,
     parse_coil_counts,
+    parse_groundplane,
     parse_turn_cases,
     progress_goal_text,
     random_seeds,
@@ -178,6 +180,38 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(
             model.fine_required_batches,
             1 + int(np.ceil(100/zero_coil_population)),
+        )
+
+    def test_automatic_budget_uses_reduced_circular_search_space(self):
+        with patch(
+            "sys.argv",
+            ["optimize_gain.py", "--automatic", "--seeds", "1,2"],
+        ):
+            radial_args = parse_args()
+        with patch(
+            "sys.argv",
+            [
+                "optimize_gain.py",
+                "--automatic",
+                "--seeds",
+                "1,2",
+                "-groundplane",
+                "circular,32",
+            ],
+        ):
+            circular_args = parse_args()
+
+        radial = _automatic_budget_model(radial_args)
+        circular = _automatic_budget_model(circular_args)
+        removed_candidates = 2*radial_args.popsize*len(radial_args.seeds)
+
+        self.assertEqual(
+            circular.rough_batch_candidates,
+            radial.rough_batch_candidates - removed_candidates,
+        )
+        self.assertEqual(
+            circular.fine_batch_candidates,
+            radial.fine_batch_candidates - removed_candidates,
         )
 
     def test_automatic_winner_does_not_regress_confirmed_rough_design(self):
@@ -403,6 +437,79 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(args.target_beamwidth_deg, 70.0)
         self.assertEqual(args.beamwidth_weight, 2.5)
 
+    def test_groundplane_cli_aliases_accept_fixed_circular_diameter(self):
+        for flag in ("--groundplane", "--ground-plane", "-groundplane"):
+            with (
+                self.subTest(flag=flag),
+                patch(
+                    "sys.argv",
+                    ["optimize_gain.py", flag, "circular,32"],
+                ),
+            ):
+                args = parse_args()
+
+            design = apply_design_overrides(
+                AntennaDesign(),
+                groundplane=args.groundplane,
+            )
+
+            self.assertEqual(design.groundplane_type, "circular")
+            self.assertAlmostEqual(design.groundplane_diameter, 32e-3)
+            self.assertTrue(design.has_circular_groundplane)
+
+    def test_groundplane_parser_accepts_radials_and_rejects_invalid_values(self):
+        circular = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+        )
+        radial = apply_design_overrides(
+            circular,
+            groundplane=parse_groundplane("radials"),
+        )
+
+        self.assertEqual(radial.groundplane_type, "radials")
+        self.assertIsNone(radial.groundplane_diameter)
+        self.assertFalse(radial.has_circular_groundplane)
+
+        for value in (
+            "circular",
+            "circular,0",
+            "circular,-32",
+            "circular,nan",
+            "circular,inf",
+            "circular,32,extra",
+            "square,32",
+            "radials,32",
+        ):
+            with (
+                self.subTest(value=value),
+                self.assertRaises(ArgumentTypeError),
+            ):
+                parse_groundplane(value)
+
+    def test_circular_groundplanes_use_distinct_default_certificates(self):
+        radial = AntennaDesign()
+        circular_32 = apply_design_overrides(
+            radial,
+            groundplane=parse_groundplane("circular,32"),
+        )
+        circular_64 = apply_design_overrides(
+            radial,
+            groundplane=parse_groundplane("circular,64"),
+        )
+
+        radial_path = default_convergence_report_path(868e6, radial)
+        circular_32_path = default_convergence_report_path(868e6, circular_32)
+        circular_64_path = default_convergence_report_path(868e6, circular_64)
+
+        self.assertEqual(
+            radial_path.name,
+            "open_region_convergence_868000000hz.json",
+        )
+        self.assertIn("circular_32mm", circular_32_path.name)
+        self.assertIn("circular_64mm", circular_64_path.name)
+        self.assertEqual(len({radial_path, circular_32_path, circular_64_path}), 3)
+
     def test_cli_rejects_invalid_wire_diameter_and_lobe_angles(self):
         invalid_cases = (
             ("--wire-diameter-mm", "0"),
@@ -494,6 +601,20 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(overridden.radial_angle_deg, 60.0)
         self.assertAlmostEqual(original.wire_radius, 0.7e-3)
         self.assertEqual(original.radial_angle_deg, 60.0)
+
+    def test_design_override_applies_fixed_groundplane_without_mutating_input(self):
+        original = AntennaDesign(radial_length=0.1, radial_angle_deg=60.0)
+
+        overridden = apply_design_overrides(
+            original,
+            groundplane=parse_groundplane("circular,32"),
+        )
+
+        self.assertIsNot(overridden, original)
+        self.assertEqual(overridden.groundplane_type, "circular")
+        self.assertAlmostEqual(overridden.groundplane_diameter, 32e-3)
+        self.assertEqual(original.groundplane_type, "radials")
+        self.assertIsNone(original.groundplane_diameter)
 
     def test_search_modes_choose_safe_optimizer_defaults(self):
         with patch("sys.argv", ["optimize_gain.py"]):
@@ -588,6 +709,8 @@ class CampaignTests(unittest.TestCase):
                     "optimize_gain.py",
                     "--automatic",
                     "--random-start",
+                    "-groundplane",
+                    "circular,32",
                     "--maxiter",
                     "20",
                     "--coil-counts",
@@ -676,12 +799,14 @@ class CampaignTests(unittest.TestCase):
             self.assertTrue(rough.random_start)
             self.assertEqual(rough.pipeline_stage, "rough")
             self.assertEqual(rough.seeds, expected_rough_seeds)
+            self.assertEqual(rough.groundplane, ("circular", 32.0))
             self.assertTrue(fine.finetune)
             self.assertFalse(fine.random_start)
             self.assertTrue(fine.polish)
             self.assertEqual(fine.pipeline_stage, "fine_polish")
             self.assertEqual(fine.turn_cases, ((1, 1),))
             self.assertEqual(fine.seeds, expected_fine_seeds)
+            self.assertEqual(fine.groundplane, ("circular", 32.0))
             self.assertEqual(fine.maximum_height_mm, 432.1)
             self.assertEqual(
                 fine.maximum_height_source_override,
@@ -1411,6 +1536,27 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("coils.1.pitch", independent.names)
         self.assertIn("coils.1.radius", independent.names)
 
+    def test_circular_groundplane_is_fixed_and_omits_radial_variables(self):
+        radial_space = make_space(AntennaDesign())
+        circular_design = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+        )
+
+        circular_space = make_space(circular_design)
+        decoded = circular_space.decode(circular_space.initial_vector)
+
+        self.assertIn("radial_length", radial_space.names)
+        self.assertIn("radial_angle_deg", radial_space.names)
+        self.assertNotIn("radial_length", circular_space.names)
+        self.assertNotIn("radial_angle_deg", circular_space.names)
+        self.assertEqual(
+            len(circular_space.variables),
+            len(radial_space.variables) - 2,
+        )
+        self.assertEqual(decoded.groundplane_type, "circular")
+        self.assertAlmostEqual(decoded.groundplane_diameter, 32e-3)
+
     def test_custom_start_is_inside_the_generated_search_space(self):
         custom = AntennaDesign(
             radial_length=0.2,
@@ -1760,6 +1906,68 @@ class CampaignTests(unittest.TestCase):
                 best["simulation"]["search_bounds"]["maximum_height_source"],
                 "automatic",
             )
+
+    def test_campaign_persists_fixed_circular_groundplane(self):
+        class FakeObjective:
+            def __init__(self, space, *, on_evaluation, **_kwargs):
+                record = EvaluationRecord(
+                    tuple(space.initial_vector),
+                    -1.0,
+                    -12.0,
+                    3.0,
+                    metrics={
+                        "worst_s11_db": -12.0,
+                        "horizon_p10_gain_dbi": 2.0,
+                        "horizon_min_gain_dbi": 1.0,
+                    },
+                )
+                self.best_record = record
+                self.history = [record]
+                on_evaluation(record)
+
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "circular_campaign"
+            with patch(
+                "sys.argv",
+                [
+                    "optimize_gain.py",
+                    "-groundplane",
+                    "circular,32",
+                    "--seeds",
+                    "2",
+                    "--maxiter",
+                    "0",
+                    "--skip-convergence-check",
+                    "--output",
+                    str(output),
+                ],
+            ):
+                args = parse_args()
+            with (
+                patch(
+                    "examples.optimize_gain.RobustGainObjective",
+                    FakeObjective,
+                ),
+                patch(
+                    "examples.optimize_gain.differential_evolution",
+                    return_value=SimpleNamespace(success=True, message="fake"),
+                ),
+            ):
+                run_campaign(args)
+
+            best = json.loads(
+                (output / "campaign_best.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(best["design"]["groundplane_type"], "circular")
+        self.assertAlmostEqual(best["design"]["groundplane_diameter"], 32e-3)
+        self.assertNotIn("radial_length", best["search_space"]["bounds"])
+        self.assertNotIn("radial_angle_deg", best["search_space"]["bounds"])
+        self.assertEqual(
+            best["simulation"]["groundplane"],
+            {"type": "circular", "diameter_m": 32e-3},
+        )
+        self.assertIn("circular_32mm", args.convergence_report.name)
 
     def test_campaign_uses_and_records_validated_random_x0(self):
         spaces = []

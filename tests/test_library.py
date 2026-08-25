@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from dataclasses import asdict, replace
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import gmsh
 import numpy as np
 
 from emerge_loaded_antenna import (
@@ -28,10 +30,12 @@ from emerge_loaded_antenna import (
     build_model,
     design_fingerprint,
     design_from_dict,
+    scale_design,
     selected_open_region_configuration,
     validate_convergence_certificate,
 )
 from emerge_loaded_antenna.simulation import (
+    C0,
     _azimuth_ring_beamwidth_deg,
     _azimuth_ring_metrics,
     _configure_solver,
@@ -312,6 +316,38 @@ class DesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "wire_radius"):
             design.validate()
 
+    def test_groundplane_defaults_to_radials(self):
+        design = AntennaDesign()
+
+        design.validate()
+
+        self.assertEqual(design.groundplane_type, "radials")
+        self.assertIsNone(design.groundplane_diameter)
+        self.assertFalse(design.has_circular_groundplane)
+
+    def test_circular_groundplane_requires_positive_finite_diameter(self):
+        design = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+        )
+
+        design.validate()
+        self.assertTrue(design.has_circular_groundplane)
+
+        for diameter in (None, 0.0, -32e-3, float("nan"), float("inf")):
+            with (
+                self.subTest(diameter=diameter),
+                self.assertRaisesRegex(ValueError, "groundplane_diameter"),
+            ):
+                replace(design, groundplane_diameter=diameter).validate()
+
+        with self.assertRaisesRegex(ValueError, "exceed the wire diameter"):
+            replace(design, groundplane_diameter=2*design.wire_radius).validate()
+
+    def test_groundplane_type_is_validated(self):
+        with self.assertRaisesRegex(ValueError, "groundplane_type"):
+            AntennaDesign(groundplane_type="square").validate()
+
     def test_single_frequency_options(self):
         sweep = FrequencySweep.single(868e6)
         options = SimulationOptions(sweep=sweep, compute_farfield=False)
@@ -370,6 +406,65 @@ class DesignTests(unittest.TestCase):
             & set(artifacts.termination_selection.tags)
         )
 
+    def test_circular_groundplane_replaces_hub_and_radials_in_model(self):
+        design = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+            radial_length=9.0,
+            straight_lengths=(50e-3,),
+            coils=(),
+        )
+        mesh = MeshSettings(
+            wavelength_resolution=0.5,
+            air_margin_wavelengths=0.10,
+        )
+        artifacts = build_model(
+            design,
+            SimulationOptions(
+                mesh=mesh,
+                open_region=OpenRegionSettings(
+                    mode="abc",
+                    abc_buffer_wavelengths=0.10,
+                ),
+                solve=False,
+                verbose=False,
+            ),
+        )
+
+        self.assertEqual(artifacts.ground_system.dim, 2)
+        self.assertIs(
+            artifacts.model.find_geo("CircularGroundPlane"),
+            artifacts.ground_system,
+        )
+        with self.assertRaises(ValueError):
+            artifacts.model.find_geo("GroundHub")
+        with self.assertRaises(ValueError):
+            artifacts.model.find_geo("Radial1")
+
+        ground_boxes = [
+            gmsh.model.occ.getBoundingBox(2, tag)
+            for tag in artifacts.ground_system.tags
+        ]
+        self.assertAlmostEqual(
+            min(box[0] for box in ground_boxes),
+            -16e-3,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            max(box[3] for box in ground_boxes),
+            16e-3,
+            places=6,
+        )
+
+        air_boxes = [
+            gmsh.model.occ.getBoundingBox(3, tag)
+            for tag in artifacts.airbox.tags
+        ]
+        airbox = max(air_boxes, key=lambda box: box[3] - box[0])
+        expected_half_width = 16e-3 + mesh.air_margin_wavelengths*C0/868e6
+        self.assertAlmostEqual(-airbox[0], expected_half_width, places=6)
+        self.assertAlmostEqual(airbox[3], expected_half_width, places=6)
+
     def test_solver_selection_maps_to_emerge_and_reports_missing_backend(self):
         model = SimpleNamespace(set_solver=Mock())
         _configure_solver(model, "cudss")
@@ -382,6 +477,8 @@ class DesignTests(unittest.TestCase):
     def test_design_json_mapping_round_trip(self):
         original = replace(
             AntennaDesign(),
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
             coils=(
                 replace(AntennaDesign().coils[0], turns=2, radius=12e-3),
                 AntennaDesign().coils[1],
@@ -390,6 +487,55 @@ class DesignTests(unittest.TestCase):
         restored = design_from_dict(asdict(original))
 
         self.assertEqual(restored, original)
+
+    def test_legacy_design_json_defaults_to_radial_groundplane(self):
+        values = asdict(AntennaDesign())
+        del values["groundplane_type"]
+        del values["groundplane_diameter"]
+
+        restored = design_from_dict(values)
+
+        self.assertEqual(restored.groundplane_type, "radials")
+        self.assertIsNone(restored.groundplane_diameter)
+        self.assertFalse(restored.has_circular_groundplane)
+
+    def test_radial_fingerprint_remains_compatible_with_legacy_designs(self):
+        design = AntennaDesign()
+        legacy = asdict(design)
+        del legacy["groundplane_type"]
+        del legacy["groundplane_diameter"]
+        expected = hashlib.sha256(
+            json.dumps(
+                legacy,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(design_fingerprint(design), expected)
+        self.assertNotEqual(
+            design_fingerprint(
+                replace(
+                    design,
+                    groundplane_type="circular",
+                    groundplane_diameter=32e-3,
+                )
+            ),
+            expected,
+        )
+
+    def test_scale_design_scales_circular_groundplane_diameter(self):
+        original = AntennaDesign(
+            groundplane_type="circular",
+            groundplane_diameter=32e-3,
+        )
+
+        scaled = scale_design(original, 2.5)
+
+        self.assertEqual(scaled.groundplane_type, "circular")
+        self.assertAlmostEqual(scaled.groundplane_diameter, 80e-3)
+        self.assertTrue(scaled.has_circular_groundplane)
+        self.assertAlmostEqual(original.groundplane_diameter, 32e-3)
 
     def test_legacy_transition_offset_json_is_normalized(self):
         values = asdict(AntennaDesign())

@@ -139,6 +139,41 @@ def parse_int_list(value: str) -> tuple[int, ...]:
     return result
 
 
+def parse_groundplane(value: str) -> tuple[str, float | None]:
+    """Parse a fixed ground-plane selection from the optimizer CLI.
+
+    Circular diameters are entered in millimetres and converted to metres when
+    the option is applied to an :class:`AntennaDesign`.
+    """
+    parts = tuple(part.strip() for part in value.split(","))
+    kind = parts[0].lower() if parts else ""
+    if kind in {"radial", "radials"}:
+        if len(parts) != 1:
+            raise argparse.ArgumentTypeError(
+                "radials does not take a diameter; use 'radials'"
+            )
+        return ("radials", None)
+    if kind != "circular":
+        raise argparse.ArgumentTypeError(
+            "groundplane must be 'radials' or 'circular,DIAMETER_MM'"
+        )
+    if len(parts) != 2 or not parts[1]:
+        raise argparse.ArgumentTypeError(
+            "circular groundplane must look like 'circular,32'"
+        )
+    try:
+        diameter_mm = float(parts[1])
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "circular groundplane diameter must be a number in millimetres"
+        ) from error
+    if not np.isfinite(diameter_mm) or diameter_mm <= 0:
+        raise argparse.ArgumentTypeError(
+            "circular groundplane diameter must be finite and positive"
+        )
+    return ("circular", diameter_mm)
+
+
 def random_seeds(count: int) -> tuple[int, ...]:
     """Generate distinct system-random uint32 seeds for one campaign."""
     if count < 1:
@@ -217,6 +252,24 @@ def free_space_wavelength(frequency_hz: float) -> float:
     return C0 / frequency_hz
 
 
+def default_convergence_report_path(
+    frequency_hz: float,
+    design: AntennaDesign | None = None,
+) -> Path:
+    """Return a non-colliding default certificate path for a ground system."""
+    frequency_label = f"{round(frequency_hz)}hz"
+    groundplane_label = ""
+    if design is not None and design.has_circular_groundplane:
+        assert design.groundplane_diameter is not None
+        diameter_label = f"{design.groundplane_diameter*1e3:.12g}"
+        diameter_label = diameter_label.replace("-", "m").replace(".", "p")
+        groundplane_label = f"_circular_{diameter_label}mm"
+    return (
+        Path("optimization_results")
+        / f"open_region_convergence_{frequency_label}{groundplane_label}.json"
+    )
+
+
 def default_maximum_height(
     frequency_hz: float,
     maximum_coil_count: int,
@@ -288,16 +341,42 @@ def design_for_turn_case(
 def apply_design_overrides(
     design: AntennaDesign,
     wire_diameter_mm: float | None = None,
+    groundplane: tuple[str, float | None] | None = None,
 ) -> AntennaDesign:
-    """Apply a fixed physical wire diameter to a starting design."""
-    if wire_diameter_mm is None:
+    """Apply fixed physical CLI dimensions to a starting design."""
+    if wire_diameter_mm is None and groundplane is None:
         return design
-    if not np.isfinite(wire_diameter_mm) or wire_diameter_mm <= 0:
-        raise ValueError("wire_diameter_mm must be finite and positive")
-    overridden = replace(
-        design,
-        wire_radius=float(wire_diameter_mm) * 1e-3 / 2,
-    )
+    changes: dict[str, object] = {}
+    if wire_diameter_mm is not None:
+        if not np.isfinite(wire_diameter_mm) or wire_diameter_mm <= 0:
+            raise ValueError("wire_diameter_mm must be finite and positive")
+        changes["wire_radius"] = float(wire_diameter_mm) * 1e-3 / 2
+    if groundplane is not None:
+        kind, diameter_mm = groundplane
+        if kind == "circular":
+            if (
+                diameter_mm is None
+                or not np.isfinite(diameter_mm)
+                or diameter_mm <= 0
+            ):
+                raise ValueError(
+                    "circular groundplane diameter must be finite and positive"
+                )
+            changes.update(
+                groundplane_type="circular",
+                groundplane_diameter=float(diameter_mm) * 1e-3,
+            )
+        elif kind == "radials" and diameter_mm is None:
+            changes.update(
+                groundplane_type="radials",
+                groundplane_diameter=None,
+            )
+        else:
+            raise ValueError(
+                "groundplane must be ('radials', None) or "
+                "('circular', DIAMETER_MM)"
+            )
+    overridden = replace(design, **changes)
     overridden.validate()
     return overridden
 
@@ -465,30 +544,31 @@ def make_space(
                 radius_bounds[1],
             )
             variables.append(DesignVariable(f"coils.{index}.radius", *radius_bounds))
-    minimum_radial = max(
-        RADIAL_LENGTH_RANGE_LAMBDA[0] * wavelength,
-        MINIMUM_STRAIGHT_WIRE_DIAMETERS * wire_diameter,
-    )
-    radial_bounds = enclose(
-        (
-            minimum_radial,
-            max(
-                RADIAL_LENGTH_RANGE_LAMBDA[1] * wavelength,
-                1.5 * minimum_radial,
-            ),
-        ),
-        base.radial_length,
-    )
-    angle_bounds = (
-        max(0.1, min(5.0, base.radial_angle_deg - 10.0)),
-        min(89.9, max(75.0, base.radial_angle_deg + 10.0)),
-    )
-    variables.extend(
-        (
-            DesignVariable("radial_length", *radial_bounds),
-            DesignVariable("radial_angle_deg", *angle_bounds),
+    if not base.has_circular_groundplane:
+        minimum_radial = max(
+            RADIAL_LENGTH_RANGE_LAMBDA[0] * wavelength,
+            MINIMUM_STRAIGHT_WIRE_DIAMETERS * wire_diameter,
         )
-    )
+        radial_bounds = enclose(
+            (
+                minimum_radial,
+                max(
+                    RADIAL_LENGTH_RANGE_LAMBDA[1] * wavelength,
+                    1.5 * minimum_radial,
+                ),
+            ),
+            base.radial_length,
+        )
+        angle_bounds = (
+            max(0.1, min(5.0, base.radial_angle_deg - 10.0)),
+            min(89.9, max(75.0, base.radial_angle_deg + 10.0)),
+        )
+        variables.extend(
+            (
+                DesignVariable("radial_length", *radial_bounds),
+                DesignVariable("radial_angle_deg", *angle_bounds),
+            )
+        )
     return DesignSpace(
         base,
         variables,
@@ -1504,6 +1584,18 @@ def parse_args() -> argparse.Namespace:
             "warm-start design"
         ),
     )
+    parser.add_argument(
+        "--groundplane",
+        "--ground-plane",
+        "-groundplane",
+        type=parse_groundplane,
+        metavar="TYPE[,DIAMETER_MM]",
+        help=(
+            "fixed ground system: 'circular,32' selects a 32 mm diameter "
+            "circular sheet and removes radial variables; 'radials' selects "
+            "the legacy hub and wire radials"
+        ),
+    )
     budget = parser.add_mutually_exclusive_group()
     budget.add_argument(
         "--maxiter",
@@ -2018,12 +2110,9 @@ def parse_args() -> argparse.Namespace:
         stamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
         frequency_label = f"{args.frequency_mhz:g}mhz".replace(".", "p")
         args.output = Path("optimization_results") / f"{frequency_label}_{stamp}"
-    if args.convergence_report is None:
-        frequency_hz = round(args.frequency_hz)
-        args.convergence_report = (
-            Path("optimization_results")
-            / f"open_region_convergence_{frequency_hz}hz.json"
-        )
+    args.convergence_report_is_default = args.convergence_report is None
+    if args.convergence_report_is_default:
+        args.convergence_report = default_convergence_report_path(args.frequency_hz)
     return args
 
 
@@ -2625,7 +2714,13 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
     initial = apply_design_overrides(
         initial,
         wire_diameter_mm=getattr(args, "wire_diameter_mm", None),
+        groundplane=getattr(args, "groundplane", None),
     )
+    if getattr(args, "convergence_report_is_default", False):
+        args.convergence_report = default_convergence_report_path(
+            frequency_hz,
+            initial,
+        )
     resolve_topology(args, initial)
     automatic_height = args.maximum_height_mm is None
     if automatic_height:
@@ -2634,7 +2729,12 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
             max(args.coil_counts),
         )
     schedules = build_case_schedules(args, initial, frequency_hz)
-    convergence_benchmark = load_reference_design(frequency_hz)
+    convergence_benchmark = replace(
+        load_reference_design(frequency_hz),
+        groundplane_type=initial.groundplane_type,
+        groundplane_diameter=initial.groundplane_diameter,
+    )
+    convergence_benchmark.validate()
     mesh = replace(
         MeshSettings(),
         air_margin_wavelengths=args.air_margin_wavelengths,
@@ -2675,6 +2775,10 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
             ),
         },
         "target_frequency_hz": frequency_hz,
+        "groundplane": {
+            "type": initial.groundplane_type,
+            "diameter_m": initial.groundplane_diameter,
+        },
         "match_bandwidth_hz": args.match_bandwidth_mhz * 1e6,
         "farfield_angular_step_deg": args.angular_step,
         "optimizer_budget_unit": "candidate_evaluations",
@@ -2940,10 +3044,22 @@ def run_campaign(args: argparse.Namespace) -> CampaignOutcome:
         + (" [automatic]" if automatic_height else "")
     )
     print("Length priors   : bare 0.18-0.70 lambda; loaded sections 0.15-0.72 lambda")
-    print(
-        "Coil/radial     : pitch 0.010-0.040 lambda, radius "
-        "0.015-0.050 lambda, radials 0.15-0.40 lambda; wire floors apply"
-    )
+    if initial.has_circular_groundplane:
+        print(
+            "Coil bounds     : pitch 0.010-0.040 lambda, radius "
+            "0.015-0.050 lambda; wire floors apply"
+        )
+        assert initial.groundplane_diameter is not None
+        print(
+            "Groundplane     : circular, "
+            f"{initial.groundplane_diameter*1e3:g} mm diameter (fixed)"
+        )
+    else:
+        print(
+            "Coil/radial     : pitch 0.010-0.040 lambda, radius "
+            "0.015-0.050 lambda, radials 0.15-0.40 lambda; wire floors apply"
+        )
+        print("Groundplane     : radial hub and wire radials")
     print(f"Wire diameter   : {2 * initial.wire_radius * 1e3:.3f} mm")
     print("Coil counts     : " + ", ".join(str(count) for count in args.coil_counts))
     print(
@@ -3473,6 +3589,7 @@ def _automatic_budget_model(args: argparse.Namespace) -> AutomaticBudgetModel:
     initial = apply_design_overrides(
         initial,
         wire_diameter_mm=getattr(args, "wire_diameter_mm", None),
+        groundplane=getattr(args, "groundplane", None),
     )
     topology_args = copy.deepcopy(args)
     resolve_topology(topology_args, initial)

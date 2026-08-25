@@ -10,6 +10,7 @@ if _venv_mkl is not None:
 
 from .config import (
     ABC_TYPES,
+    GROUNDPLANE_TYPES,
     OPEN_REGION_MODES,
     SOLVER_CHOICES,
     AntennaDesign,
@@ -57,6 +58,7 @@ from .simulation import (
 __all__ = [
     "ABC_TYPES",
     "CONVERGENCE_SCHEMA_VERSION",
+    "GROUNDPLANE_TYPES",
     "OPEN_REGION_MODES",
     "REFERENCE_DESIGN_FREQUENCY_HZ",
     "REFERENCE_DESIGN_PATH",
