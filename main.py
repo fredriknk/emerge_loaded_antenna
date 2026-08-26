@@ -33,26 +33,26 @@ F0 = 869.5*MHz
 
 # Deliberately static example: every physical dimension is visible here and
 # remains unchanged if the packaged optimizer reference is updated.
-more = 1.5*mm
+
 DESIGN = design_from_dict({
-    "wire_radius": 0.0008,
+    "wire_radius": 0.8*mm,
     "straight_lengths": [
-      0.120+more,
-      0.210+more
+      121.5*mm,
+      211.5*mm,
     ],
     "coils": [
       {
-        "radius": 0.0098,
+        "radius": 9.8*mm,
         "turns": 2,
-        "pitch": 0.0136,
+        "pitch": 13.0*mm,
         "transition": 0.006,
         "handedness": "RH"
       }
     ],
-    "port_height": 0.002,
+    "port_height": 2*mm,
     "port_impedance": 50.0,
     "groundplane_type": "circular",
-    "groundplane_diameter": 0.045
+    "groundplane_diameter": 45*mm
   })
 
 DESIGN.validate()
