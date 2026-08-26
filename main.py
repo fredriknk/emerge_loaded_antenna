@@ -33,18 +33,26 @@ F0 = 869.5*MHz
 
 # Deliberately static example: every physical dimension is visible here and
 # remains unchanged if the packaged optimizer reference is updated.
-
+more = 1.5*mm
 DESIGN = design_from_dict({
     "wire_radius": 0.0008,
-    "radial_length": 0.09833394357975579,
-    "radial_angle_deg": 19.20521089494316,
-    "radial_count": 4,
     "straight_lengths": [
-      0.0670496407920941
+      0.120+more,
+      0.210+more
     ],
-    "coils": [],
-    "port_height": 0.0019965497412305923,
-    "port_impedance": 50.0
+    "coils": [
+      {
+        "radius": 0.0098,
+        "turns": 2,
+        "pitch": 0.0136,
+        "transition": 0.006,
+        "handedness": "RH"
+      }
+    ],
+    "port_height": 0.002,
+    "port_impedance": 50.0,
+    "groundplane_type": "circular",
+    "groundplane_diameter": 0.045
   })
 
 DESIGN.validate()
@@ -60,15 +68,15 @@ EXPORT_FORMERS = True
 EXAMPLE_OUTPUT = Path("example_outputs")
 
 OPTIONS = SimulationOptions(
-    sweep=FrequencySweep(center=F0, span=50*MHz, points=5),
+    sweep=FrequencySweep(center=F0, span=30*MHz, points=5),
     mesh=MeshSettings(
         wire_sections=6,
         antenna_size_factor=3.0,
         radial_size_factor=10.0,
         feed_size_factor=3.0,
-        curved_boundary_segments=12,
-        wavelength_resolution=0.33,
-        air_margin_wavelengths=0.25,
+        curved_boundary_segments=20,
+        wavelength_resolution=0.2,
+        air_margin_wavelengths=0.3,
         preview_points_per_turn=20,
     ),
     solve=RUN_SOLVER,
@@ -259,8 +267,8 @@ def export_example_artifacts(result) -> tuple[Path | None, Path | None]:
         formers = export_coil_formers(
             DESIGN,
             EXAMPLE_OUTPUT / "coil_formers.step",
-            extra_length=5*mm,
-            groove_clearance=0.1*mm,
+            extra_length=10*mm,
+            groove_clearance=0.2*mm,
             spacing=5*mm,
         )
         print(f"Forming tools    : {formers.resolve()}")
